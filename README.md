@@ -1,30 +1,32 @@
 # Btfm training
 
-This project focuses on processing and analyzing Sentinel-2 satellite imagery data using self-supervised learning techniques, specifically the Barlow Twins approach. The resulting foundation model can be fine-tuned for downstream tasks such as land cover classification.
+Processing and analyzing Sentinel-2 satellite imagery data using the Barlow Twins approach. 
 
-## Key Components
+The resulting foundation model can be fine-tuned for downstream tasks.
+
+## Components
 
 - **Data Handling**: Dataset classes for Sentinel-2 time series data (`data.py`)
 - **Model Architectures**: Various backbone options including MLP, CNN, and Transformer (`backbones.py`)
 - **Self-Supervised Learning**: Implementation of Barlow Twins approach (`barlow_twins.py`)
 - **Training Scripts**: 
   - Self-supervised training (`train.py`)
-  - Supervised fine-tuning for classification (`train_classification.py`, `train_classification_maddy.py`)
+  - Supervised fine-tuning for classification (`train_classification.py`)
 - **Inference and Visualization**: Tools for model inference and creating false-color maps (`infer.py`, `create_false_color_map.py`)
 - **Utilities**: Helper functions for analysis and visualization (`utils.py`)
 
-## Workflow
+## Pipeline
 
 1. **Train a self-supervised model using Barlow Twins on Sentinel-2 data**
    - Script: `train.py`
-   - This script implements the Barlow Twins self-supervised learning approach.
+   - This script implements the Barlow Twins SSL approach.
    - It uses the `SentinelTimeSeriesDataset` class from `data.py` to load and process Sentinel-2 time series data.
    - The model architecture (e.g., SimpleMLP, SimpleCNN, or TransformerEncoder) is defined in `backbones.py`.
    - The Barlow Twins specific components (loss function, projection head) are implemented in `barlow_twins.py`.
    - Training progress and metrics are logged using Wandb.
 
 2. **Fine-tune the pre-trained model for land cover classification**
-   - Scripts: `train_classification.py` or `train_classification_maddy.py`
+   - Scripts: `train_classification.py`
    - These scripts load the pre-trained model from step 1 and fine-tune it for land cover classification.
    - They use the `SentinelTimeSeriesDatasetForDownstreaming` class from `data.py` for loading labeled data.
    - A classification head is added on top of the pre-trained backbone.
@@ -44,5 +46,5 @@ Additional utilities:
 
 To run the complete workflow:
 1. Execute `train.py` to obtain a pre-trained model.
-2. Run either `train_classification.py` or `train_classification_maddy.py` for fine-tuning.
+2. Run `train_classification.py` for fine-tuning.
 3. Use `infer.py` followed by `create_false_color_map.py` to generate visualizations of results on new data.
