@@ -7,8 +7,8 @@ The resulting foundation model can be fine-tuned for downstream tasks.
 ## Components
 
 - **Data Handling**: Dataset classes for Sentinel-2 time series data (`data.py`)
-- **Model Architectures**: Various backbone options including MLP, CNN, and Transformer (`backbones.py`)
-- **Self-Supervised Learning**: Implementation of Barlow Twins approach (`barlow_twins.py`)
+- **Model Architectures**: Various options including MLP, CNN, and Transformer (`backbones.py`)
+- **Self-Supervised Learning**: Implementation of Barlow Twins (`barlow_twins.py`)
 - **Training Scripts**: 
   - Self-supervised training (`train.py`)
   - Supervised fine-tuning for classification (`train_classification.py`)
@@ -40,7 +40,7 @@ The resulting foundation model can be fine-tuned for downstream tasks.
    - `create_false_color_map.py` generates false-color visualizations of the model's representations.
    - The script `read_inference_map.py` can be used to load and display the generated classification maps.
 
-Additional utilities:
+Utilities:
 - `transforms.py` defines data augmentation and preprocessing transforms used in training.
 - `utils.py` contains helper functions for various tasks such as computing effective rank and plotting cross-correlation matrices.
 
