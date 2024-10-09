@@ -1,0 +1,24 @@
+#!/bin/bash -l
+#SBATCH --job-name=AIFORCE-BTFM
+#SBATCH --account=CLIMATE-DAWN-GPU
+#SBATCH --partition=pvc # Dawn PVC partition
+#SBATCH --mem=400G
+#SBATCH --gres=gpu:1
+#SBATCH --time 1:00:00
+#SBATCH --error="logs/slurm-%A_%a.err"
+#SBATCH --output="logs/slurm-%A_%a.out"
+
+pwd; hostname; date
+
+echo "Starting job $SLURM_JOB_ID / $SLURM_ARRAY_JOB_ID / $SLURM_ARRAY_TASK_ID on $SLURM_JOB_NODELIST"
+
+module load default-dawn
+source /usr/local/dawn/software/external/intel-oneapi/2024.0/setvars.sh
+module load intelpython-conda
+module load gcc
+conda activate pytorch-gpu
+
+ZE_FLAT_DEVICE_HIERARCHY=FLAT ZE_AFFINITY_MASK=0.0 ZES_ENABLE_SYSMAN=1 python3 embed.py xpu 0 &
+ZE_FLAT_DEVICE_HIERARCHY=FLAT ZE_AFFINITY_MASK=0.1 ZES_ENABLE_SYSMAN=1 python3 embed.py xpu 1 &
+
+wait
