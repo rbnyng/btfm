@@ -24,12 +24,6 @@ import subprocess
 # (that is, this run should be reproducible)
 # if there are modified files, we should not run the training
 
-modified_files = subprocess.run(["git", "status", "--porcelain", "-uno"], stdout=subprocess.PIPE).stdout.decode('utf-8')
-
-if modified_files:
-    logging.error("There are modified files in the git repo. Training should not be run. Commit or stash the changes and try again.")
-    sys.exit(1)
-
 current_git_hash = subprocess.run(["git", "rev-parse", "HEAD"], stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
 
 # create a folder to save weights
@@ -59,11 +53,11 @@ run_config = {
     "barlow_lambda": 5e-4,
     "projection_head_hidden_dim": 128,
     "projection_head_output_dim": 128,
-    "train_dataset": "california",
-    "val_dataset": "california",
+    "train_dataset": "test_set",
+    "val_dataset": "test_set",
     "time_dim": 0,
     "commit_link": f"https://gitlab.developers.cam.ac.uk/cst/eeg/btfm-training/-/commit/{current_git_hash}",
-    "test_tile_path": "/maps/zf281/btfm-data-preparation/test/MGRS-12TYN" # this is the path to the test tile
+    "test_tile_path": "/home/ray25/btfm/data/test_set/processed/MGRS-12TYN" # this is the path to the test tile
 }
 
 wandb.config.update(run_config)

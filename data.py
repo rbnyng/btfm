@@ -143,7 +143,7 @@ class SentinelTimeSeriesDatasetForDownstreaming(IterableDataset):
 
 # base_path = "./"
 # base_downstream_path = "data-downstream"
-base_path = "../../sj514/btfm/"
+base_path = "/home/ray25/btfm/"
 base_downstream_path = "../btfm-data-preparation/"
 
 class SentinelTimeSeriesDataset(IterableDataset):
