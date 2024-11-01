@@ -16,13 +16,12 @@ import seaborn as sns
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 
-# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-class OptimizedRepresentationExtractor:
+class RepresentationExtractor:
     def __init__(self, model, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.model = model
         self.device = device
@@ -152,7 +151,7 @@ class Sentinel2Georeferencer:
             x_offset = x_utm % 100000  # Distance from western edge of tile
             y_offset = y_utm % 100000  # Distance from southern edge of tile
             
-            # Original Sentinel-2 resolution is 10m, but we subsampled by factor of 10
+            # Original sentinel-2 resolution is 10m, but we subsampled by factor of 10
             # So each pixel now represents 100m
             PIXEL_SIZE = 100  # 10m * 10 (subsampling factor)
             
@@ -188,23 +187,21 @@ class BiodiversityPredictor:
     def __init__(self, model):
         self.model = model
         self.georeferencer = Sentinel2Georeferencer()
-        self.representation_extractor = OptimizedRepresentationExtractor(model)
+        self.representation_extractor = RepresentationExtractor(model)
         self.rf_model = None
         
     def prepare_dataset(self, biodiversity_df, base_sentinel_path):
-        # Get list of available tiles
         available_tiles = set(Path(base_sentinel_path).glob("MGRS-*"))
         available_mgrs = {t.name.split('-')[1] for t in available_tiles}
         print(f"Available MGRS tiles: {sorted(available_mgrs)}")
         
-        # Filter biodiversity data to only include locations in available tiles
         filtered_df = biodiversity_df.copy()
         filtered_df['mgrs'] = filtered_df.apply(
             lambda row: self.georeferencer.get_tile_id(row['latitude'], row['longitude']), 
             axis=1
         )
         filtered_df = filtered_df[filtered_df['mgrs'].isin(available_mgrs)]
-        # In prepare_dataset, after filtering:
+        
         print("\nFirst few entries of filtered data:")
         print(filtered_df[['latitude', 'longitude', 'mgrs']].head())
         print("\nShape of bands.npy for first tile:")
@@ -216,13 +213,11 @@ class BiodiversityPredictor:
         if len(filtered_df) == 0:
             raise ValueError("No biodiversity locations found within available tiles!")
         
-        # Process only the filtered locations
         features = []
         targets = []
         processed_locations = []
         skipped_locations = []
         
-        # Group locations by tile to minimize loading/unloading tiles
         locations_by_tile = {}
         for idx, row in tqdm(filtered_df.iterrows(), desc="Processing locations"):
             if pd.isna(row['rarefied']):
@@ -253,7 +248,6 @@ class BiodiversityPredictor:
                 locations_by_tile[tile_path] = []
             locations_by_tile[tile_path].append((idx, row, pixel_coords))
         
-        # Process each tile
         for tile_path, locations in tqdm(locations_by_tile.items(), desc="Processing tiles"):
             coords = [loc[2] for loc in locations]
             representations = self.representation_extractor.extract_representation_for_coordinates(
@@ -261,7 +255,6 @@ class BiodiversityPredictor:
                 coords
             )
             
-            # Process results
             for (idx, row, coords) in locations:
                 repr = representations[coords]
                 if repr is not None:
@@ -277,7 +270,6 @@ class BiodiversityPredictor:
                 else:
                     skipped_locations.append((idx, "Insufficient valid observations"))
         
-        # Log processing summary
         logging.info(f"Successfully processed {len(processed_locations)} locations")
         logging.info(f"Skipped {len(skipped_locations)} locations")
         
@@ -288,10 +280,54 @@ class BiodiversityPredictor:
         print(filtered_df[['latitude', 'longitude', 'mgrs']].head())
         return np.array(features), np.array(targets), processed_locations, skipped_locations
     
-    def train(self, X, y):
-        """Train random forest using Barlow Twins representations and save detailed results."""
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+    def save_prediction_analysis(self, y_test, test_pred, info_test, prefix=""):
+        comparison_df = pd.DataFrame({
+            'Latitude': [info['latitude'] for info in info_test],
+            'Longitude': [info['longitude'] for info in info_test],
+            'MGRS_Tile': [info['tile_path'].split('/')[-1] for info in info_test],
+            'Pixel_Row': [info['pixel_coords'][0] for info in info_test],
+            'Pixel_Col': [info['pixel_coords'][1] for info in info_test],
+            'Actual_Biodiversity': y_test,
+            'Predicted_Biodiversity': test_pred,
+            'Absolute_Error': np.abs(y_test - test_pred),
+            'Percent_Error': np.abs((y_test - test_pred) / y_test) * 100
+        })
+        
+        comparison_df = comparison_df.sort_values('Absolute_Error', ascending=False)
+        summary_stats = {
+            'mean_absolute_error': np.mean(comparison_df['Absolute_Error']),
+            'median_absolute_error': np.median(comparison_df['Absolute_Error']),
+            'mean_percent_error': np.mean(comparison_df['Percent_Error']),
+            'median_percent_error': np.median(comparison_df['Percent_Error']),
+            'mse': mean_squared_error(y_test, test_pred),
+            'r2': r2_score(y_test, test_pred)
+        }
+        
+        filename = f"{prefix}prediction_analysis.csv"
+        comparison_df.to_csv(filename, index=False)
+        
+        print(f"\n{prefix.title()}Set Summary Statistics:")
+        print(f"Mean Absolute Error: {summary_stats['mean_absolute_error']:.2f}")
+        print(f"Median Absolute Error: {summary_stats['median_absolute_error']:.2f}")
+        print(f"Mean Percent Error: {summary_stats['mean_percent_error']:.2f}%")
+        print(f"Median Percent Error: {summary_stats['median_percent_error']:.2f}%")
+        print(f"R² Score: {summary_stats['r2']:.4f}")
+        
+        print(f"\nWorst 3 Predictions ({prefix}set):")
+        print(comparison_df[['Latitude', 'Longitude', 'MGRS_Tile', 
+                            'Actual_Biodiversity', 'Predicted_Biodiversity', 
+                            'Absolute_Error']].head(3))
+        print(f"\nBest 3 Predictions ({prefix}set):")
+        print(comparison_df[['Latitude', 'Longitude', 'MGRS_Tile', 
+                            'Actual_Biodiversity', 'Predicted_Biodiversity', 
+                            'Absolute_Error']].tail(3))
+        
+        return summary_stats
+
+    def train(self, X, y, location_info):
+        """Train random forest and analyze results."""
+        X_train, X_test, y_train, y_test, info_train, info_test = train_test_split(
+            X, y, location_info, test_size=0.2, random_state=42
         )
         
         self.rf_model = RandomForestRegressor(
@@ -308,41 +344,17 @@ class BiodiversityPredictor:
         train_pred = self.rf_model.predict(X_train)
         test_pred = self.rf_model.predict(X_test)
         
-        # Create detailed test set comparison
-        test_comparison = pd.DataFrame({
-            'Actual_Biodiversity': y_test,
-            'Predicted_Biodiversity': test_pred,
-            'Absolute_Error': np.abs(y_test - test_pred),
-            'Percent_Error': np.abs((y_test - test_pred) / y_test) * 100
-        })
-        
-        # Sort by absolute error to easily see worst/best predictions
-        test_comparison = test_comparison.sort_values('Absolute_Error', ascending=False)
-        
-        # Save to CSV
-        test_comparison.to_csv('test_set_predictions.csv')
+        train_stats = self.save_prediction_analysis(y_train, train_pred, info_train, "train_")
+        test_stats = self.save_prediction_analysis(y_test, test_pred, info_test, "test_")
         
         results = {
-            'train_mse': mean_squared_error(y_train, train_pred),
-            'train_r2': r2_score(y_train, train_pred),
-            'test_mse': mean_squared_error(y_test, test_pred),
-            'test_r2': r2_score(y_test, test_pred),
+            'train_stats': train_stats,
+            'test_stats': test_stats,
             'feature_importance': self.rf_model.feature_importances_,
             'X_test': X_test,
             'y_test': y_test,
             'test_pred': test_pred
         }
-        
-        # Print summary statistics
-        print("\nTest Set Summary Statistics:")
-        print(f"Mean Absolute Error: {np.mean(test_comparison['Absolute_Error']):.2f}")
-        print(f"Median Absolute Error: {np.median(test_comparison['Absolute_Error']):.2f}")
-        print(f"Mean Percent Error: {np.mean(test_comparison['Percent_Error']):.2f}%")
-        print(f"Median Percent Error: {np.median(test_comparison['Percent_Error']):.2f}%")
-        print("\nWorst 3 Predictions:")
-        print(test_comparison.head(3))
-        print("\nBest 3 Predictions:")
-        print(test_comparison.tail(3))
         
         return results
     
@@ -350,23 +362,20 @@ class BiodiversityPredictor:
         """Plot evaluation results."""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
         
-        # Actual vs Predicted plot
         ax1.scatter(results['y_test'], results['test_pred'], alpha=0.5)
         ax1.plot([min(results['y_test']), max(results['y_test'])], 
                 [min(results['y_test']), max(results['y_test'])], 
-                'r--', label='Perfect prediction')
+                'r--')
         ax1.set_xlabel('Actual Biodiversity')
         ax1.set_ylabel('Predicted Biodiversity')
         ax1.set_title('Actual vs Predicted Biodiversity')
         ax1.legend()
         
-        # Feature Importance plot
         feature_importance = pd.DataFrame({
             'feature': [f'dim_{i}' for i in range(len(results['feature_importance']))],
             'importance': results['feature_importance']
         }).sort_values('importance', ascending=True)
         
-        # Changed barh to barplot with horizontal orientation
         sns.barplot(data=feature_importance.tail(10), y='feature', x='importance', ax=ax2)
         ax2.set_title('Top 10 Most Important Representation Dimensions')
         
@@ -374,7 +383,6 @@ class BiodiversityPredictor:
         return fig
         
 def main():
-    # Configuration
     config = {
         "backbone": "transformer",
         "backbone_param_hidden_dim": 128,
@@ -385,7 +393,6 @@ def main():
         "time_dim": 0
     }
     
-    # Initialize backbone
     backbone = TransformerEncoder(
         sample_size=config["sample_size"],
         band_size=config["band_size"],
@@ -398,21 +405,15 @@ def main():
     # Load checkpoint
     checkpoint = torch.load("checkpoints/20241101_111618/model_checkpoint_val_best.pt")
     backbone.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    
-    # Create encoder model
     model = EncoderModel(backbone, config["time_dim"])
     
-    # Initialize biodiversity predictor
     predictor = BiodiversityPredictor(model)
-    
-    # Load biodiversity data
     biodiversity_df = pd.read_csv("../../../maps/ray25/data/spun_data/ECM_richness_europe.csv")
     
-    # In main(), before prepare_dataset:
     print("\nSample of biodiversity data:")
     print(biodiversity_df[['latitude', 'longitude']].describe())
     
-    # Prepare dataset using Barlow Twins representations
+    # Prepare dataset using BTFM representations
     X, y, processed_locations, skipped_locations = predictor.prepare_dataset(
         biodiversity_df,
         base_sentinel_path="../../../maps/ray25/data/germany/processed"
@@ -420,21 +421,17 @@ def main():
     
     logging.info(f"Shape of extracted representations: {X.shape}")
     
-    # Save processed and skipped locations for analysis
     pd.DataFrame(processed_locations).to_csv('processed_locations.csv', index=False)
     pd.DataFrame(skipped_locations, columns=['index', 'reason']).to_csv('skipped_locations.csv', index=False)
     
-    # Train and evaluate model
-    results = predictor.train(X, y)
+    results = predictor.train(X, y, processed_locations)
     
-    # Log results
     logging.info("Model Performance:")
     logging.info(f"Training MSE: {results['train_mse']:.4f}")
     logging.info(f"Training R2: {results['train_r2']:.4f}")
     logging.info(f"Test MSE: {results['test_mse']:.4f}")
     logging.info(f"Test R2: {results['test_r2']:.4f}")
     
-    # Plot and save results
     fig = predictor.plot_results(results)
     fig.savefig('biodiversity_prediction_results.png')
     plt.close()
