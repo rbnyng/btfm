@@ -10,10 +10,17 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import wandb
 
-def rankme(w, eps=1e-7):
-    s = w.svd(compute_uv=False)[1]
+# def rankme(w, eps=1e-7):
+#     s = w.svd(compute_uv=False)[1]
+#     p = s / (s.sum() + eps)
+#     return torch.exp(-(p * torch.log(p)).sum())
+
+def rankme(z, eps=1e-7):
+    s = z.svd(compute_uv=False)[1]
     p = s / (s.sum() + eps)
-    return torch.exp(-(p * torch.log(p)).sum())
+    entropy = -(p * torch.log(p + eps)).sum()
+    rankme_score = entropy / torch.log(torch.tensor(float(len(s))))
+    return rankme_score
 
 # generates and returns an image of the cross-correlation matrix
 # for the provided z0 and z1 arrays
@@ -108,8 +115,20 @@ def test_model_and_visualize(model, path_to_tile, test_batch_size=512, sample_si
     # Reshape PCA results back to the original tile shape
     pca_image = pca_result.reshape(height, width, n_pca_components)
 
-    # Normalize PCA components for visualization
-    pca_image = ((pca_image - pca_image.min()) / (pca_image.max() - pca_image.min()) * 255).astype(np.uint8)
+    r = pca_image[:, :, 0]
+    g = pca_image[:, :, 1]
+    b = pca_image[:, :, 2]
+
+    # scale to [0, 255]
+    r = np.round((r - np.min(r)) / (np.max(r) - np.min(r)) * 255)
+    r = np.clip(r, 0, 255).astype(np.uint8)
+    g = np.round((g - np.min(g)) / (np.max(g) - np.min(g)) * 255)
+    g = np.clip(g, 0, 255).astype(np.uint8)
+    b = np.round((b - np.min(b)) / (np.max(b) - np.min(b)) * 255)
+    b = np.clip(b, 0, 255).astype(np.uint8)
+
+    # reshape back to 3 channels
+    pca_image = np.stack([r, g, b], axis=-1)
 
     # Visualize PCA-based representation as an image
     plt.imshow(pca_image)
@@ -122,3 +141,59 @@ def test_model_and_visualize(model, path_to_tile, test_batch_size=512, sample_si
     wandb.log({"PCA-based Representation Visualization": wandb.Image(pca_image_path)})
 
     return pca_image
+
+
+# function which returns 1) an RGB composite tile from the first tile in a SentinelTimeSeriesDataset
+# and 2) a matrix of pixels which are valid for the first tile along with their positions in the composite
+def get_tile(dataset, base_path):
+    tile = dataset.tiles[0]
+    bands = np.load(base_path + f'data/{dataset.dataset_name}/processed/{tile}/bands.npy')
+    masks = np.load(base_path + f'data/{dataset.dataset_name}/processed/{tile}/masks.npy')
+    bands_mean = np.load(base_path + f'data/{dataset.dataset_name}/processed/{tile}/band_mean.npy')
+    bands_std = np.load(base_path + f'data/{dataset.dataset_name}/processed/{tile}/band_std.npy')
+    # Convert to tensor and standardize bands
+    bands = torch.tensor(bands).float()
+    masks = torch.tensor(masks)
+    bands_mean = torch.tensor(bands_mean)
+    bands_std = torch.tensor(bands_std)
+    bands = (bands - bands_mean) / bands_std
+
+    masks_sum = masks.sum(dim=0)
+    sample_size = dataset.transform.sample_size
+    gt_min_valid = masks_sum > dataset.min_valid_pixels
+    gt_min_valid_mask = np.nonzero(gt_min_valid)
+    total_valid_samples = gt_min_valid.sum().item()
+
+    valid_pixels = np.zeros((total_valid_samples, sample_size), dtype=np.uint8)
+    valid_pixel_positions = np.zeros((total_valid_samples, 2), dtype=np.uint16)
+
+    for i, (x, y) in enumerate(zip(gt_min_valid_mask[0], gt_min_valid_mask[1])):
+        mask_sample = masks[:, x, y]
+        band_sample = bands[:, x, y]
+        samples, _ = dataset.transform(mask_sample, band_sample)
+        valid_pixels[i] = samples[0, :, 0]
+        valid_pixel_positions[i] = (x, y)
+
+    composite_sum = np.zeros((bands.shape[1], bands.shape[2], bands.shape[3]), dtype=np.float32)
+    composite_count = np.zeros((bands.shape[1], bands.shape[2], bands.shape[3]), dtype=np.float32)
+
+    for t in range(bands.shape[0]):
+        for b in [0, 1, 2]:
+            band = bands[t, :, :, b]
+            mask = masks[t, :, :]
+            band = band.numpy()
+            mask = mask.numpy()
+            composite_sum[mask > 0, b] += band[mask > 0]
+            composite_count[mask > 0, b] += 1
+
+    composite = composite_sum / (composite_count + 1e-6)
+    composite_rgb = np.zeros((bands.shape[1], bands.shape[2], 3), dtype=np.uint8)
+    for b in range(3):
+        band = composite[:, :, b]
+        band = band - band.min()
+        band = band / band.max()
+        band = (band * 255).astype(np.uint8)
+
+        composite_rgb[:, :, b] = band
+
+    return composite_rgb, valid_pixels, valid_pixel_positions
