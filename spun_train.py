@@ -427,10 +427,10 @@ def main():
     results = predictor.train(X, y, processed_locations)
     
     logging.info("Model Performance:")
-    logging.info(f"Training MSE: {results['train_mse']:.4f}")
-    logging.info(f"Training R2: {results['train_r2']:.4f}")
-    logging.info(f"Test MSE: {results['test_mse']:.4f}")
-    logging.info(f"Test R2: {results['test_r2']:.4f}")
+    logging.info(f"Training MSE: {results['train_stats']['mse']:.4f}")
+    logging.info(f"Training R2: {results['train_stats']['r2']:.4f}")
+    logging.info(f"Test MSE: {results['test_stats']['mse']:.4f}")
+    logging.info(f"Test R2: {results['test_stats']['r2']:.4f}")
     
     fig = predictor.plot_results(results)
     fig.savefig('biodiversity_prediction_results.png')
