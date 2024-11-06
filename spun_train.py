@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
+from scipy import stats
 
 logging.basicConfig(
     level=logging.INFO,
@@ -311,7 +312,7 @@ class BiodiversityPredictor:
         print(f"Median Absolute Error: {summary_stats['median_absolute_error']:.2f}")
         print(f"Mean Percent Error: {summary_stats['mean_percent_error']:.2f}%")
         print(f"Median Percent Error: {summary_stats['median_percent_error']:.2f}%")
-        print(f"R² Score: {summary_stats['r2']:.4f}")
+        print(f"R2 Score: {summary_stats['r2']:.4f}")
         
         print(f"\nWorst 3 Predictions ({prefix}set):")
         print(comparison_df[['Latitude', 'Longitude', 'MGRS_Tile', 
@@ -362,15 +363,21 @@ class BiodiversityPredictor:
         """Plot evaluation results."""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
         
-        ax1.scatter(results['y_test'], results['test_pred'], alpha=0.5)
-        ax1.plot([min(results['y_test']), max(results['y_test'])], 
-                [min(results['y_test']), max(results['y_test'])], 
-                'r--')
         ax1.set_xlabel('Actual Biodiversity')
         ax1.set_ylabel('Predicted Biodiversity')
         ax1.set_title('Actual vs Predicted Biodiversity')
         ax1.legend()
         
+        slope, intercept, r_value, p_value, std_err = stats.linregress(results['y_test'], results['test_pred'])
+        line_x = np.array([min(results['y_test']), max(results['y_test'])])
+        line_y = slope * line_x + intercept
+
+        ax1.scatter(results['y_test'], results['test_pred'], alpha=0.5, label='Predictions')
+        ax1.plot(line_x, line_y, 'r--', label=f'OLS line (slope={slope:.2f})')  # OLS trend line
+        ax1.plot([min(results['y_test']), max(results['y_test'])], 
+                 [min(results['y_test']), max(results['y_test'])], 
+                 'k:', label='Identity')  # Identity line
+                 
         feature_importance = pd.DataFrame({
             'feature': [f'dim_{i}' for i in range(len(results['feature_importance']))],
             'importance': results['feature_importance']
@@ -403,7 +410,7 @@ def main():
     )
     
     # Load checkpoint
-    checkpoint = torch.load("checkpoints/20241101_111618/model_checkpoint_val_best.pt")
+    checkpoint = torch.load("checkpoints/20241102_181412/model_checkpoint_val_best.pt")
     backbone.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model = EncoderModel(backbone, config["time_dim"])
     
