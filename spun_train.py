@@ -16,6 +16,7 @@ import seaborn as sns
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 from scipy import stats
+import json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,11 +139,9 @@ class Sentinel2Georeferencer:
             # Load points of interest for this tile to check sampling rate
             poi_path = Path(tile_path) / "points_of_interest.json"
             with open(poi_path, 'r') as f:
-                poi_data = json.load(f)
-                tile_id = Path(tile_path).name
-                tile_pois = poi_data.get(tile_id, [])
-                poi_coords = {(p['row'], p['col']) for p in tile_pois}
-
+                poi_data = json.load(f) 
+                poi_coords = {(p['row'], p['col']) for p in poi_data} 
+                
             # Get UTM zone from MGRS ID
             mgrs_id = Path(tile_path).name.split('-')[1]
             zone = int(mgrs_id[:2])
@@ -215,11 +214,19 @@ class BiodiversityPredictor:
         self.rf_model = None
         
     def prepare_dataset(self, biodiversity_df, base_sentinel_path):
+        averaged_df = (biodiversity_df
+            .groupby(['latitude', 'longitude'])
+            .agg({
+                'rarefied': 'mean'
+            })
+            .reset_index())
+            
+
         available_tiles = set(Path(base_sentinel_path).glob("MGRS-*"))
         available_mgrs = {t.name.split('-')[1] for t in available_tiles}
         print(f"Available MGRS tiles: {sorted(available_mgrs)}")
         
-        filtered_df = biodiversity_df.copy()
+        filtered_df = averaged_df.copy()
         filtered_df['mgrs'] = filtered_df.apply(
             lambda row: self.georeferencer.get_tile_id(row['latitude'], row['longitude']), 
             axis=1
@@ -233,6 +240,7 @@ class BiodiversityPredictor:
         bands = np.load(first_tile / "bands.npy")
         print(f"Bands shape: {bands.shape}")
         print(f"Filtered from {len(biodiversity_df)} to {len(filtered_df)} locations within available tiles")
+        print(f"Reduced from {len(biodiversity_df)} to {len(averaged_df)} unique coordinates after averaging")
         
         if len(filtered_df) == 0:
             raise ValueError("No biodiversity locations found within available tiles!")
@@ -303,7 +311,7 @@ class BiodiversityPredictor:
         print("\nSample coordinates from filtered data:")
         print(filtered_df[['latitude', 'longitude', 'mgrs']].head())
         return np.array(features), np.array(targets), processed_locations, skipped_locations
-    
+        
     def save_prediction_analysis(self, y_test, test_pred, info_test, prefix=""):
         comparison_df = pd.DataFrame({
             'Latitude': [info['latitude'] for info in info_test],
@@ -433,7 +441,7 @@ def main():
     )
     
     # Load checkpoint
-    checkpoint = torch.load("checkpoints/20241102_181412/model_checkpoint_val_best.pt")
+    checkpoint = torch.load("checkpoints/20241106_202119/model_checkpoint_val_best.pt")
     backbone.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model = EncoderModel(backbone, config["time_dim"])
     
