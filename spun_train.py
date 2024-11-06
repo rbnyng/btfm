@@ -130,13 +130,19 @@ class Sentinel2Georeferencer:
             )
         return self.transformers[epsg_code]
 
-    def get_pixel_coordinates(self, lat, lon, tile_path):
+
+
+    def get_pixel_coordinates(self, lat: float, lon: float, tile_path: str) -> Optional[Tuple[int, int]]:
         """Convert lat/lon to pixel coordinates using the tile's spatial reference"""
         try:
-            # Load the array to get its shape
-            bands = np.load(f"{tile_path}/bands.npy")
-            height, width = bands.shape[1:3]
-            
+            # Load points of interest for this tile to check sampling rate
+            poi_path = Path(tile_path) / "points_of_interest.json"
+            with open(poi_path, 'r') as f:
+                poi_data = json.load(f)
+                tile_id = Path(tile_path).name
+                tile_pois = poi_data.get(tile_id, [])
+                poi_coords = {(p['row'], p['col']) for p in tile_pois}
+
             # Get UTM zone from MGRS ID
             mgrs_id = Path(tile_path).name.split('-')[1]
             zone = int(mgrs_id[:2])
@@ -152,25 +158,42 @@ class Sentinel2Georeferencer:
             x_offset = x_utm % 100000  # Distance from western edge of tile
             y_offset = y_utm % 100000  # Distance from southern edge of tile
             
-            # Original sentinel-2 resolution is 10m, but we subsampled by factor of 10
-            # So each pixel now represents 100m
-            PIXEL_SIZE = 100  # 10m * 10 (subsampling factor)
+            # Convert to full-resolution pixel coordinates first
+            ORIGINAL_PIXEL_SIZE = 10  # Original Sentinel-2 resolution in meters
+            full_res_col = int(x_offset / ORIGINAL_PIXEL_SIZE)
+            full_res_row = int((100000 - y_offset) / ORIGINAL_PIXEL_SIZE)  # Invert Y axis
             
-            # Convert to pixel coordinates
-            col = int(x_offset / PIXEL_SIZE)
-            row = int((100000 - y_offset) / PIXEL_SIZE)  # Invert Y axis as image coordinates go top-down
+            # Constants matching Rust code
+            REGULAR_SAMPLE_RATE = 10
+            ROI_RADIUS = 5  # This should match the Rust constant
             
-            if (0 <= row < height and 0 <= col < width):
-                print(f"Successfully converted coordinates ({lat}, {lon}) to pixels ({row}, {col})")
+            # Check if this point is near any point of interest
+            is_near_poi = any(
+                abs(full_res_row - poi_row) <= ROI_RADIUS * 10 and  # *10 because ROI_RADIUS is in sampled units
+                abs(full_res_col - poi_col) <= ROI_RADIUS * 10
+                for poi_row, poi_col in poi_coords
+            )
+            
+            # Use appropriate sampling rate
+            sample_rate = 1 if is_near_poi else REGULAR_SAMPLE_RATE
+            
+            # Convert to sampled coordinates
+            row = full_res_row // REGULAR_SAMPLE_RATE  # Always use regular sampling rate for final index
+            col = full_res_col // REGULAR_SAMPLE_RATE
+            
+            # Check bounds
+            max_size = 10980 // REGULAR_SAMPLE_RATE
+            if 0 <= row < max_size and 0 <= col < max_size:
+                logging.info(f"Converted coordinates ({lat}, {lon}) to pixels ({row}, {col}) using sample_rate {sample_rate}")
                 return row, col
             else:
-                logging.warning(f"Coordinates ({lat}, {lon}) fall outside tile bounds: row={row}, col={col}, height={height}, width={width}")
+                logging.warning(f"Coordinates ({lat}, {lon}) fall outside tile bounds")
                 return None
                 
         except Exception as e:
             logging.error(f"Error converting coordinates ({lat}, {lon}): {str(e)}")
             return None
-        
+            
     def find_matching_tile(self, lat, lon, base_path):
         mgrs_id = self.get_tile_id(lat, lon)
         if mgrs_id is None:

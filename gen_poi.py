@@ -4,6 +4,7 @@ import logging
 import mgrs
 from pyproj import Transformer
 from typing import Optional, Tuple, List, Dict
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -119,24 +120,46 @@ def generate_points_of_interest(biodiversity_df: pd.DataFrame) -> Dict[str, List
     return points_by_tile
 
 def main():
+    # Define paths
+    data_dir = Path("../../../maps/ray25/germany")  # Base data directory
+    biodiversity_file = Path("../../../maps/ray25/data/spun_data/ECM_richness_europe.csv")
+
+    # Make sure data directory exists
+    data_dir.mkdir(parents=True, exist_ok=True)
+    
     # Load biodiversity data
-    biodiversity_df = pd.read_csv("../../../maps/ray25/data/spun_data/ECM_richness_europe.csv")
+    biodiversity_df = pd.read_csv(biodiversity_file)
+    
+    logging.info(f"Loaded biodiversity data from {biodiversity_file}")
     
     # Generate points of interest
     points_by_tile = generate_points_of_interest(biodiversity_df)
     
-    # Save to JSON file
-    with open('points_of_interest.json', 'w') as f:
+    # Convert to flat array of coordinates for Rust
+    flat_coordinates = [
+        {
+            "row": point["row"],
+            "col": point["col"]
+        }
+        for tile_points in points_by_tile.values()
+        for point in tile_points
+    ]
+    
+    # Save to JSON files in data directory
+    poi_path = data_dir / "points_of_interest.json"
+    tile_poi_path = data_dir / "points_by_tile.json"
+    
+    # Save flat array for Rust processing
+    with open(poi_path, 'w') as f:
+        json.dump(flat_coordinates, f, indent=2)
+    
+    # Save tile-mapped version for Python use
+    with open(tile_poi_path, 'w') as f:
         json.dump(points_by_tile, f, indent=2)
     
-    logging.info(f"Generated points of interest for {len(points_by_tile)} tiles")
-    for tile_id, points in points_by_tile.items():
-        logging.info(f"Tile {tile_id}: {len(points)} points")
-        # Print coordinate ranges for verification
-        rows = [p['row'] for p in points]
-        cols = [p['col'] for p in points]
-        logging.info(f"  Row range: {min(rows)}-{max(rows)}")
-        logging.info(f"  Col range: {min(cols)}-{max(cols)}")
-
+    logging.info(f"Generated {len(flat_coordinates)} points of interest across {len(points_by_tile)} tiles")
+    logging.info(f"Saved points_of_interest.json to {poi_path}")
+    logging.info(f"Saved points_by_tile.json to {tile_poi_path}")
+        
 if __name__ == "__main__":
     main()
