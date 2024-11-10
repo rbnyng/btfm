@@ -15,8 +15,6 @@ from scipy.interpolate import interp1d, CubicSpline
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-base_downstream_path = "../btfm-data-preparation/"
-
 class SentinelTimeSeriesDataset(IterableDataset):
     def __init__(self, base_path, dataset_name, min_valid_pixels, transform, shuffle=True, buffer_size=6_000_00, shuffle_worker_id=None):
         self.base_path = base_path
@@ -927,12 +925,11 @@ class PastisHDF5Dataset(Dataset):
 
 #         return generate()
 
-
-
+base_downstream_path = "../btfm-data-preparation/"
 
 if __name__ == "__main__":
-    base_path = "../../sj514/btfm/"  # 替换为你的数据路径
-    dataset_name = "california"  # 替换为你的数据集名称
+    base_path = "../../../maps-priv/maps/ray25/"  # 替换为你的数据路径
+    dataset_name = "germany"  # 替换为你的数据集名称
     min_valid_pixels = 48
     sample_size = 16
     buffer_size = 6000

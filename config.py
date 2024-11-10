@@ -28,11 +28,11 @@ default_config = {
     "gradient_clipping": 1.0,
     
     # Dataset settings
-    "data_dir": "../../sj514/btfm/", # Path to the SSL training/validation data
+    "data_dir": "../../../maps-priv/maps/ray25/", # Path to the SSL training/validation data
     "base_downstream_path": "../btfm-data-preparation/", # Path to the downstream data
-    "test_tile_path": "/maps/zf281/btfm-data-preparation/test/MGRS-12TYN", # Path to the test tile
-    "train_dataset": "california", # options: wyoming, california
-    "val_dataset": "california",
+    "test_tile_path": "/maps-priv/maps/ray25/data/germany/processed/MGRS-32UPB", # Path to the test tile
+    "train_dataset": "germany", # options: wyoming, california
+    "val_dataset": "germany",
     "min_valid": 32,
     "sample_size": 16,
     "band_size": 10,

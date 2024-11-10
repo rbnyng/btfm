@@ -23,6 +23,11 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
+torch.manual_seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(42)
+    torch.backends.cudnn.deterministic = True
+
 class RepresentationExtractor:
     def __init__(self, model, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.model = model
@@ -34,14 +39,16 @@ class RepresentationExtractor:
         """Load and normalize tile data."""
         try:
             # Load data
-            bands = np.load(tile_path / "bands.npy")
-            masks = np.load(tile_path / "masks.npy")
-            doys = np.load(tile_path / "doys.npy")
+            bands = np.load(tile_path / "bands.npy")  # Shape: (147, 1098, 1098, 11)
+            masks = np.load(tile_path / "masks.npy")  # Shape: (147, 1098, 1098)
+            doys = np.load(tile_path / "doys.npy")    # Shape: (147,)
             
             # Load and apply normalization
-            bands_mean = np.load(tile_path / "band_mean.npy")
-            bands_std = np.load(tile_path / "band_std.npy")
-            bands = (bands - bands_mean) / bands_std
+            bands_mean = np.load(tile_path / "band_mean.npy")  # Shape: (11,)
+            bands_std = np.load(tile_path / "band_std.npy")    # Shape: (11,)
+            
+            # Broadcasting normalization across time and spatial dimensions
+            bands = (bands - bands_mean[None, None, None, :]) / bands_std[None, None, None, :]
             
             return bands, masks, doys
         except Exception as e:
@@ -53,10 +60,9 @@ class RepresentationExtractor:
         tile_path: Path,
         coordinates: List[Tuple[int, int]],
         batch_size: int = 32,
-        sample_size: int = 16,
-        min_valid_samples: int = 32
+        min_valid_samples: int = 1
     ) -> Dict[Tuple[int, int], Optional[np.ndarray]]:
-        """Extract representations for specific coordinates in a tile."""
+        """Extract representations for specific coordinates in a tile using all valid observations."""
         bands, masks, doys = self.load_and_normalize_tile(tile_path)
         if bands is None:
             return {}
@@ -71,9 +77,10 @@ class RepresentationExtractor:
         def process_batch():
             if not current_batch['pixels']:
                 return
-                
-            batch_pixels = torch.tensor(current_batch['pixels'], dtype=torch.float32).to(self.device)
-            batch_doys = torch.tensor(current_batch['doys'], dtype=torch.long).to(self.device)
+            
+            # Stack all sequences - they're all length 147
+            batch_pixels = torch.tensor(np.stack(current_batch['pixels']), dtype=torch.float32).to(self.device)
+            batch_doys = torch.tensor(np.stack(current_batch['doys']), dtype=torch.long).to(self.device)
             
             with torch.no_grad():
                 batch_representations = self.model(batch_pixels, batch_doys)
@@ -86,29 +93,28 @@ class RepresentationExtractor:
             current_batch['coords'].clear()
 
         for row, col in coordinates:
-            pixel_data = bands[:, row, col, :]
-            mask_data = masks[:, row, col]
+            # Extract the full time series for this pixel
+            pixel_data = bands[:, row, col, :]  # Shape: (147, 11)
+            mask_data = masks[:, row, col]      # Shape: (147,)
             
-            if mask_data.sum() < min_valid_samples:
+            # Check if we have enough valid observations
+            if np.sum(mask_data) < min_valid_samples:
                 representations[(row, col)] = None
                 continue
-                
-            valid_indices = np.nonzero(mask_data)[0]
-            selected_indices = np.random.choice(valid_indices, sample_size, replace=False)
             
-            sampled_pixel_data = pixel_data[selected_indices]
-            sampled_doy_data = doys[selected_indices] // 7
+            # Convert days to weeks
+            doy_data = doys // 7  # Shape: (147,)
             
-            current_batch['pixels'].append(sampled_pixel_data)
-            current_batch['doys'].append(sampled_doy_data)
+            current_batch['pixels'].append(pixel_data)
+            current_batch['doys'].append(doy_data)
             current_batch['coords'].append((row, col))
             
             if len(current_batch['pixels']) >= batch_size:
                 process_batch()
         
-        process_batch()
+        process_batch()  # Process any remaining data
         return representations
-
+        
 class Sentinel2Georeferencer:
     def __init__(self):
         self.mgrs_converter = mgrs.MGRS()
@@ -441,7 +447,9 @@ def main():
     )
     
     # Load checkpoint
-    checkpoint = torch.load("checkpoints/20241106_202119/model_checkpoint_val_best.pt")
+    checkpoint = torch.load("checkpoints/20241106_191719/model_checkpoint_val_best.pt")
+    #checkpoint = torch.load("checkpoints/20241108_101052/model_checkpoint_step_140000.pt")
+    #checkpoint = torch.load("../../../maps-priv/maps/zf281/btfm-training-10.4/checkpoints/20241106_221143/model_checkpoint_val_best.pt")
     backbone.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model = EncoderModel(backbone, config["time_dim"])
     

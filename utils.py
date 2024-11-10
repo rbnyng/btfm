@@ -95,6 +95,10 @@ def extract_representations_fixed_timesteps(model, tile_data, tile_masks, doys, 
         tile_masks (_type_): shape: (151, 1098, 1098)
         doys (_type_): shape: (151,)
     """
+    tile_data = np.delete(tile_data, 5, axis=3)
+    bands_mean = np.delete(bands_mean, 5)
+    bands_std = np.delete(bands_std, 5)
+    
     height, width = tile_data.shape[1], tile_data.shape[2]
     representation_map = np.zeros((height, width, model.backbone.latent_dim), dtype=np.float32)
 

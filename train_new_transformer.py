@@ -279,7 +279,16 @@ def main():
 
                 if step % run_config["log_interval_steps"] == 0:
                     current_time = time.time()
-                    effective_rank = rankme(z0)
+                    
+                    try:
+                        effective_rank = rankme(z0)
+                    except torch._C._LinAlgError as e:
+                        print("Error during SVD computation:", e)
+                        print("Printing z0 for debugging:")
+                        print(z0)
+                        torch.save(z0, 'z0_debug.pt') 
+                        sys.exit(1)
+
                     examples_per_sec = (examples-last_examples) / (current_time - last_update_time)
                     current_learning_rate = optimizer.param_groups[0]['lr']
                     if len(running_loss) == running_loss_steps:
