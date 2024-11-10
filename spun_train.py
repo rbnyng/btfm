@@ -8,7 +8,6 @@ import logging
 from tqdm import tqdm
 from backbones import TransformerEncoder, TransformerEncoderWithMask
 from barlow_twins import EncoderModel
-import rasterio
 import mgrs
 from pyproj import Transformer
 import matplotlib.pyplot as plt
@@ -18,6 +17,7 @@ from typing import Optional, Tuple, List, Dict
 from scipy import stats
 import json
 from einops import rearrange  
+from scipy.interpolate import interp1d, CubicSpline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,13 +83,46 @@ class RepresentationExtractor:
         self.model.eval()
         self.tile_cache = TileCache(max_cache_size=cache_size)
 
+    def compress_to_fixed_timesteps(self, pixel_data, mask_data, doys):
+        """Same method as SentinelTimeSeriesDatasetFixedTimestep"""
+        result_bands = torch.zeros((96, pixel_data.shape[1]), dtype=torch.float32)
+        result_masks = torch.zeros(96, dtype=torch.int8)
+        
+        # Create 96 time intervals evenly distributed across the year
+        week_intervals = [(i * 3.75, min(i * 3.75 + 3.75, 365)) for i in range(96)]
+        
+        for idx, (start_day, end_day) in enumerate(week_intervals):
+            # Find indices within the time interval
+            week_idx = np.where((doys >= start_day) & (doys <= end_day))[0]
+            if len(week_idx) > 0:
+                # If multiple observations exist, take the middle one
+                selected_idx = week_idx[len(week_idx) // 2]
+                result_bands[idx] = torch.from_numpy(pixel_data[selected_idx])
+                result_masks[idx] = mask_data[selected_idx]
+        
+        # Perform cubic spline interpolation for missing values
+        valid_indices = np.where(result_masks.numpy() == 1)[0]
+        if len(valid_indices) > 1:
+            # Interpolate each feature dimension
+            interpolated_bands = []
+            for feature_idx in range(pixel_data.shape[1]):
+                cs = CubicSpline(valid_indices, 
+                               result_bands[valid_indices, feature_idx].numpy(), 
+                               bc_type='natural')
+                all_indices = np.arange(96)
+                interpolated = cs(all_indices)
+                interpolated = np.clip(interpolated, a_min=0, a_max=None)
+                interpolated_bands.append(interpolated)
+            
+            result_bands = torch.tensor(np.stack(interpolated_bands, axis=1), 
+                                      dtype=torch.float32)
+        
+        return result_bands, result_masks
 
     def extract_representation_for_coordinates(
         self,
         tile_path,
         coordinates,
-        batch_size: int = 32,
-        sample_size: int = 96,
         min_valid_samples: int = 32):
 
         bands, masks, doys = self.tile_cache.get(tile_path)
@@ -112,19 +145,16 @@ class RepresentationExtractor:
                 representations[(row, col)] = None
                 continue
 
-            # Get valid indices and sample
-            valid_indices = np.nonzero(mask_data)[0]
-            if len(valid_indices) < sample_size:
-                selected_indices = np.random.choice(valid_indices, sample_size, replace=True)
-            else:
-                selected_indices = np.random.choice(valid_indices, sample_size, replace=False)
-            
-            # Extract samples
-            sampled_pixel_data = pixel_data[selected_indices]
-            
             try:
+                # Compress to fixed timesteps and interpolate
+                sampled_pixel_data, sampled_masks = self.compress_to_fixed_timesteps(
+                    pixel_data, 
+                    mask_data,
+                    doys
+                )
+                
                 # Convert to tensor and process
-                pixel_tensor = torch.tensor(sampled_pixel_data[np.newaxis, ...], dtype=torch.float32).to(self.device)
+                pixel_tensor = sampled_pixel_data.unsqueeze(0).to(self.device)
                 
                 with torch.no_grad():
                     representation = self.model(pixel_tensor)
@@ -340,14 +370,10 @@ class BiodiversityPredictor:
             raise ValueError("No features were successfully extracted! Check your data and paths.")
             
         features_array = np.array(features)
-        print("\nAll features statistics:")
-        print("Shape:", features_array.shape)
-        print("Mean:", np.mean(features_array))
-        print("Std:", np.std(features_array))
-        print("First row first 5 values:", features_array[0, :5])
         
         print("\nSample coordinates from filtered data:")
         print(filtered_df[['latitude', 'longitude', 'mgrs']].head())
+        
         return np.array(features), np.array(targets), processed_locations, skipped_locations
         
     def save_prediction_analysis(self, y_test, test_pred, info_test, prefix=""):
@@ -375,22 +401,6 @@ class BiodiversityPredictor:
         
         filename = f"{prefix}prediction_analysis.csv"
         comparison_df.to_csv(filename, index=False)
-        
-        print(f"\n{prefix.title()}Set Summary Statistics:")
-        print(f"Mean Absolute Error: {summary_stats['mean_absolute_error']:.2f}")
-        print(f"Median Absolute Error: {summary_stats['median_absolute_error']:.2f}")
-        print(f"Mean Percent Error: {summary_stats['mean_percent_error']:.2f}%")
-        print(f"Median Percent Error: {summary_stats['median_percent_error']:.2f}%")
-        print(f"R2 Score: {summary_stats['r2']:.4f}")
-        
-        print(f"\nWorst 3 Predictions ({prefix}set):")
-        print(comparison_df[['Latitude', 'Longitude', 'MGRS_Tile', 
-                            'Actual_Biodiversity', 'Predicted_Biodiversity', 
-                            'Absolute_Error']].head(3))
-        print(f"\nBest 3 Predictions ({prefix}set):")
-        print(comparison_df[['Latitude', 'Longitude', 'MGRS_Tile', 
-                            'Actual_Biodiversity', 'Predicted_Biodiversity', 
-                            'Absolute_Error']].tail(3))
         
         return summary_stats
 
