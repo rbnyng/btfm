@@ -6,7 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 import logging
 from tqdm import tqdm
-from backbones import TransformerEncoder
+from backbones import TransformerEncoder, TransformerEncoderWithMask
 from barlow_twins import EncoderModel
 import rasterio
 import mgrs
@@ -17,102 +17,127 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 from scipy import stats
 import json
+from einops import rearrange  
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(42)
-    torch.backends.cudnn.deterministic = True
-
-class RepresentationExtractor:
-    def __init__(self, model, device='cuda' if torch.cuda.is_available() else 'cpu'):
-        self.model = model
-        self.device = device
-        self.model.to(device)
-        self.model.eval()
-
-    def load_and_normalize_tile(self, tile_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Load and normalize tile data."""
+class TileCache:
+    def __init__(self, max_cache_size=5):
+        self.cache = {}
+        self.max_cache_size = max_cache_size
+        self.access_order = []
+    
+    def get(self, tile_path):
+        """Get tile data from cache or load if not present"""
+        if tile_path in self.cache:
+            # Update access order
+            self.access_order.remove(tile_path)
+            self.access_order.append(tile_path)
+            return self.cache[tile_path]
+            
+        # Load new data
+        bands, masks, doys = self._load_and_normalize_tile(tile_path)
+        
+        # Manage cache size
+        if len(self.cache) >= self.max_cache_size:
+            # Remove least recently used tile
+            oldest_tile = self.access_order.pop(0)
+            del self.cache[oldest_tile]
+        
+        # Add new data to cache
+        self.cache[tile_path] = (bands, masks, doys)
+        self.access_order.append(tile_path)
+        
+        return bands, masks, doys
+    
+    def _load_and_normalize_tile(self, tile_path):
+        """Existing load_and_normalize_tile logic"""
         try:
-            # Load data
-            bands = np.load(tile_path / "bands.npy")  # Shape: (147, 1098, 1098, 11)
-            masks = np.load(tile_path / "masks.npy")  # Shape: (147, 1098, 1098)
-            doys = np.load(tile_path / "doys.npy")    # Shape: (147,)
+            bands = np.load(tile_path / "bands.npy")
+            masks = np.load(tile_path / "masks.npy")
+            doys = np.load(tile_path / "doys.npy")
             
-            # Load and apply normalization
-            bands_mean = np.load(tile_path / "band_mean.npy")  # Shape: (11,)
-            bands_std = np.load(tile_path / "band_std.npy")    # Shape: (11,)
+            bands = np.delete(bands, 5, axis=3)
             
-            # Broadcasting normalization across time and spatial dimensions
-            bands = (bands - bands_mean[None, None, None, :]) / bands_std[None, None, None, :]
+            bands_mean = np.load(tile_path / "band_mean.npy")
+            bands_std = np.load(tile_path / "band_std.npy")
+            
+            bands_mean = np.delete(bands_mean, 5)
+            bands_std = np.delete(bands_std, 5)
+        
+            bands = (bands - bands_mean) / bands_std
             
             return bands, masks, doys
         except Exception as e:
             logging.error(f"Error loading tile data from {tile_path}: {str(e)}")
             return None, None, None
+            
+class RepresentationExtractor:
+    def __init__(self, model, device='cuda' if torch.cuda.is_available() else 'cpu', cache_size=5):
+        self.model = model
+        self.device = device
+        self.model.to(device)
+        self.model.eval()
+        self.tile_cache = TileCache(max_cache_size=cache_size)
+
 
     def extract_representation_for_coordinates(
         self,
-        tile_path: Path,
-        coordinates: List[Tuple[int, int]],
+        tile_path,
+        coordinates,
         batch_size: int = 32,
-        min_valid_samples: int = 1
-    ) -> Dict[Tuple[int, int], Optional[np.ndarray]]:
-        """Extract representations for specific coordinates in a tile using all valid observations."""
-        bands, masks, doys = self.load_and_normalize_tile(tile_path)
+        sample_size: int = 96,
+        min_valid_samples: int = 32):
+
+        bands, masks, doys = self.tile_cache.get(tile_path)
         if bands is None:
             return {}
 
-        representations = {}
-        current_batch = {
-            'pixels': [],
-            'doys': [],
-            'coords': []
-        }
+        print(f"\nProcessing coordinates for tile: {tile_path}")
+        print(f"Number of coordinates to process: {len(coordinates)}")
+        print(f"First few coordinates: {coordinates[:5]}")
 
-        def process_batch():
-            if not current_batch['pixels']:
-                return
-            
-            # Stack all sequences - they're all length 147
-            batch_pixels = torch.tensor(np.stack(current_batch['pixels']), dtype=torch.float32).to(self.device)
-            batch_doys = torch.tensor(np.stack(current_batch['doys']), dtype=torch.long).to(self.device)
-            
-            with torch.no_grad():
-                batch_representations = self.model(batch_pixels, batch_doys)
-            
-            for idx, coord in enumerate(current_batch['coords']):
-                representations[coord] = batch_representations[idx].cpu().numpy()
-            
-            current_batch['pixels'].clear()
-            current_batch['doys'].clear()
-            current_batch['coords'].clear()
+        representations = {}
 
         for row, col in coordinates:
-            # Extract the full time series for this pixel
-            pixel_data = bands[:, row, col, :]  # Shape: (147, 11)
-            mask_data = masks[:, row, col]      # Shape: (147,)
+            # Get all timestamps for this pixel
+            pixel_data = bands[:, row, col, :]
+            mask_data = masks[:, row, col]
             
-            # Check if we have enough valid observations
-            if np.sum(mask_data) < min_valid_samples:
+            if mask_data.sum() < min_valid_samples:
+                print(f"Skipping coordinate ({row}, {col}): insufficient valid samples")
                 representations[(row, col)] = None
                 continue
+
+            # Get valid indices and sample
+            valid_indices = np.nonzero(mask_data)[0]
+            if len(valid_indices) < sample_size:
+                selected_indices = np.random.choice(valid_indices, sample_size, replace=True)
+            else:
+                selected_indices = np.random.choice(valid_indices, sample_size, replace=False)
             
-            # Convert days to weeks
-            doy_data = doys // 7  # Shape: (147,)
+            # Extract samples
+            sampled_pixel_data = pixel_data[selected_indices]
             
-            current_batch['pixels'].append(pixel_data)
-            current_batch['doys'].append(doy_data)
-            current_batch['coords'].append((row, col))
-            
-            if len(current_batch['pixels']) >= batch_size:
-                process_batch()
-        
-        process_batch()  # Process any remaining data
+            try:
+                # Convert to tensor and process
+                pixel_tensor = torch.tensor(sampled_pixel_data[np.newaxis, ...], dtype=torch.float32).to(self.device)
+                
+                with torch.no_grad():
+                    representation = self.model(pixel_tensor)
+                    representations[(row, col)] = representation[0].cpu().numpy()
+                    
+            except Exception as e:
+                logging.error(f"Error processing coordinate ({row}, {col}): {str(e)}")
+                representations[(row, col)] = None
+
+        print(f"\nProcessed tile summary:")
+        print(f"Total coordinates processed: {len(coordinates)}")
+        print(f"Coordinates with representations: {len([v for v in representations.values() if v is not None])}")
+
         return representations
         
 class Sentinel2Georeferencer:
@@ -292,7 +317,7 @@ class BiodiversityPredictor:
                 Path(tile_path),
                 coords
             )
-            
+                
             for (idx, row, coords) in locations:
                 repr = representations[coords]
                 if repr is not None:
@@ -313,7 +338,14 @@ class BiodiversityPredictor:
         
         if len(features) == 0:
             raise ValueError("No features were successfully extracted! Check your data and paths.")
-
+            
+        features_array = np.array(features)
+        print("\nAll features statistics:")
+        print("Shape:", features_array.shape)
+        print("Mean:", np.mean(features_array))
+        print("Std:", np.std(features_array))
+        print("First row first 5 values:", features_array[0, :5])
+        
         print("\nSample coordinates from filtered data:")
         print(filtered_df[['latitude', 'longitude', 'mgrs']].head())
         return np.array(features), np.array(targets), processed_locations, skipped_locations
@@ -429,37 +461,41 @@ class BiodiversityPredictor:
 def main():
     config = {
         "backbone": "transformer",
-        "backbone_param_hidden_dim": 128,
-        "backbone_param_num_layers": 2,
-        "sample_size": 16,
-        "band_size": 11,
-        "latent_dim": 64,
-        "time_dim": 0
+        "backbone_param_hidden_dim": 256, 
+        "backbone_param_num_layers": 6,    
+        "latent_dim": 256,                
+        "projection_head_hidden_dim": 128,
+        "projection_head_output_dim": 128,
+        "time_dim": 0,
     }
     
-    backbone = TransformerEncoder(
-        sample_size=config["sample_size"],
-        band_size=config["band_size"],
-        time_dim=config["time_dim"],
-        latent_dim=config["latent_dim"],
-        hidden_dim=config["backbone_param_hidden_dim"],
-        num_layers=config["backbone_param_num_layers"]
-    )
+    model = TransformerEncoderWithMask()    
+    
+    print("\nBefore loading checkpoint:")
+    print("Model state dict keys:", model.state_dict().keys())
+    print("Embedding weight shape:", model.embedding.weight.shape)
+    print("Embedding weight sample:", model.embedding.weight[:5, :5])
+    print("Embedding on device:", model.embedding.weight.device)
     
     # Load checkpoint
-    checkpoint = torch.load("checkpoints/20241106_191719/model_checkpoint_val_best.pt")
+    #checkpoint = torch.load("checkpoints/20241106_191719/model_checkpoint_val_best.pt")
     #checkpoint = torch.load("checkpoints/20241108_101052/model_checkpoint_step_140000.pt")
-    #checkpoint = torch.load("../../../maps-priv/maps/zf281/btfm-training-10.4/checkpoints/20241106_221143/model_checkpoint_val_best.pt")
-    backbone.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    model = EncoderModel(backbone, config["time_dim"])
+    checkpoint = torch.load("../../../maps-priv/maps/zf281/btfm-training-10.4/checkpoints/20241106_221143/model_checkpoint_val_best.pt")
+
+    state_dict = {k.replace('backbone.', ''): v for k, v in checkpoint['model_state_dict'].items() 
+                 if k.startswith('backbone.')}
+    
+    model.load_state_dict(state_dict, strict=False)
+    
+    print("\nAfter loading checkpoint:")
+    print("Model state dict keys:", model.state_dict().keys())
+    print("Embedding weight shape:", model.embedding.weight.shape)
+    print("Embedding weight sample:", model.embedding.weight[:5, :5])
+    print("Embedding on device:", model.embedding.weight.device)
     
     predictor = BiodiversityPredictor(model)
     biodiversity_df = pd.read_csv("../../../maps/ray25/data/spun_data/ECM_richness_europe.csv")
     
-    print("\nSample of biodiversity data:")
-    print(biodiversity_df[['latitude', 'longitude']].describe())
-    
-    # Prepare dataset using BTFM representations
     X, y, processed_locations, skipped_locations = predictor.prepare_dataset(
         biodiversity_df,
         base_sentinel_path="../../../maps/ray25/data/germany/processed"
