@@ -192,16 +192,18 @@ class Sentinel2Georeferencer:
             )
         return self.transformers[epsg_code]
 
-
-
     def get_pixel_coordinates(self, lat: float, lon: float, tile_path: str) -> Optional[Tuple[int, int]]:
         """Convert lat/lon to pixel coordinates using the tile's spatial reference"""
         try:
-            # Load points of interest for this tile to check sampling rate
             poi_path = Path(tile_path) / "points_of_interest.json"
-            with open(poi_path, 'r') as f:
-                poi_data = json.load(f) 
-                poi_coords = {(p['row'], p['col']) for p in poi_data} 
+            poi_coords = set()  # Default to empty set
+            if poi_path.exists():
+                try:
+                    with open(poi_path, 'r') as f:
+                        poi_data = json.load(f) 
+                    poi_coords = {(p['row'], p['col']) for p in poi_data} 
+                except Exception as e:
+                    logging.warning(f"Error loading POI data from {poi_path}: {str(e)}, using regular sampling")
                 
             # Get UTM zone from MGRS ID
             mgrs_id = Path(tile_path).name.split('-')[1]
@@ -488,9 +490,12 @@ def main():
     print("Embedding on device:", model.embedding.weight.device)
     
     # Load checkpoint
-    #checkpoint = torch.load("checkpoints/20241106_191719/model_checkpoint_val_best.pt")
-    #checkpoint = torch.load("checkpoints/20241108_101052/model_checkpoint_step_140000.pt")
-    checkpoint = torch.load("../../../maps-priv/maps/zf281/btfm-training-10.4/checkpoints/20241106_221143/model_checkpoint_val_best.pt")
+    #checkpoint = torch.load("checkpoints/20241111_014211/model_checkpoint_step_70000.pt")
+    #checkpoint = torch.load("checkpoints/20241110_180007/model_checkpoint_step_10000.pt")
+    #checkpoint = torch.load("../../../maps-priv/maps/zf281/btfm-training-10.4/checkpoints/20241106_221143/model_checkpoint_val_best.pt")
+    
+    checkpoint = torch.load("checkpoints/20241111_200219/model_checkpoint_step_20000.pt") # old tile setup
+    #checkpoint = torch.load("checkpoints/20241111_144650/model_checkpoint_step_20000.pt") # new tile setup
 
     state_dict = {k.replace('backbone.', ''): v for k, v in checkpoint['model_state_dict'].items() 
                  if k.startswith('backbone.')}

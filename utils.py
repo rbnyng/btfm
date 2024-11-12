@@ -18,7 +18,14 @@ import cv2
 #     return torch.exp(-(p * torch.log(p)).sum())
 
 def rankme(z, eps=1e-7):
-    s = z.svd(compute_uv=False)[1]
+
+    try:
+        s = z.svd(compute_uv=False)[1]
+    except RuntimeError:
+        # Add small regularization
+        z = z + torch.eye(z.size(-1), device=z.device) * 1e-6
+        s = z.svd(compute_uv=False)[1]
+
     p = s / (s.sum() + eps)
     entropy = -(p * torch.log(p + eps)).sum()
     rankme_score = entropy / torch.log(torch.tensor(float(len(s))))

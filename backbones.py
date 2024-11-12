@@ -145,6 +145,11 @@ class TransformerEncoderWithMask(nn.Module):
         # 输入嵌入层
         self.embedding = nn.Linear(input_dim, embed_dim)
         
+        # self.embedding = nn.Sequential(
+            # nn.Linear(input_dim, embed_dim),
+            # nn.BatchNorm1d(96)  # BatchNorm across the sequence length
+        # )
+        
         # 位置编码，长度为 96 的序列
         self.position_encoding = nn.Parameter(torch.randn(1, 96, embed_dim))
         
@@ -160,22 +165,39 @@ class TransformerEncoderWithMask(nn.Module):
         ])
         
         # 注意力权重生成层，使用多层感知机结构
+        # self.attention_weights = nn.Sequential(
+            # nn.Linear(embed_dim, hidden_dim),
+            # nn.ReLU(),
+            # nn.Linear(hidden_dim, 1)
+        # )
+        
         self.attention_weights = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
+            nn.BatchNorm1d(96),  # BatchNorm across sequence length
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
         
         # 输出层，包含 LayerNorm 和 Dropout，降维到 latent_dim
+        # self.output_layer = nn.Sequential(
+            # nn.LayerNorm(embed_dim),
+            # nn.Dropout(dropout),
+            # nn.Linear(embed_dim, latent_dim)
+        # )
+        
         self.output_layer = nn.Sequential(
-            nn.LayerNorm(embed_dim),
+            nn.LayerNorm(embed_dim),  # Keep LayerNorm here as it's standard in Transformers
             nn.Dropout(dropout),
-            nn.Linear(embed_dim, latent_dim)
+            nn.Linear(embed_dim, latent_dim),
+            nn.BatchNorm1d(latent_dim)  # Final BatchNorm on the output features
         )
     
     def forward(self, x, mask=None):
         # 输入嵌入
         x = self.embedding(x)  # (batch_size, 96, embed_dim)
+        
+        # Clip input values to prevent extremes
+        x = torch.clamp(x, min=-100, max=100)
         
         # 添加位置编码
         x = x + self.position_encoding
