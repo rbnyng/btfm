@@ -491,68 +491,155 @@ class BiodiversityPredictor:
         plt.tight_layout()
         return fig
         
-def main():
-    config = {
-        "backbone": "transformer",
-        "backbone_param_hidden_dim": 256, 
-        "backbone_param_num_layers": 6,    
-        "latent_dim": 256,                
-        "projection_head_hidden_dim": 128,
-        "projection_head_output_dim": 128,
-        "time_dim": 0,
-    }
+class BiodiversityPredictorWithGridSearch(BiodiversityPredictor):
+    def __init__(self, model, current_timestep=16):
+        super().__init__(model)
+        self.current_timestep = current_timestep
+        
+    def grid_search_timesteps(self, biodiversity_df, base_sentinel_path, timesteps=None):
+        """
+        Perform grid search over different temporal sampling rates.
+        
+        Args:
+            biodiversity_df: DataFrame with biodiversity data
+            base_sentinel_path: Path to Sentinel data
+            timesteps: List of timestep values to try. If None, uses logarithmic scale.
+        """
+        if timesteps is None:
+            # Default logarithmic scale from 1 to 96
+            timesteps = [1, 2, 4, 8, 16, 32, 64, 96]
+        
+        results = {}
+        
+        for timestep in tqdm(timesteps, desc="Grid searching timesteps"):
+            logging.info(f"\nEvaluating timestep: {timestep}")
+            
+            # Create new representation extractor with current timestep
+            class TimestepRepresentationExtractor(RepresentationExtractor):
+                def __init__(self, model, timestep):
+                    super().__init__(model)
+                    self.current_timestep = timestep
+                
+                def compress_to_fixed_timesteps(self, pixel_data, mask_data, doys):
+                    return super().compress_to_fixed_timesteps(
+                        pixel_data, mask_data, doys, 
+                        timestep=self.current_timestep
+                    )
+            
+            self.representation_extractor = TimestepRepresentationExtractor(
+                self.model, 
+                timestep
+            )
+            
+            try:
+                # Extract features and prepare dataset
+                X, y, processed_locations, skipped_locations = self.prepare_dataset(
+                    biodiversity_df,
+                    base_sentinel_path
+                )
+                
+                # Train and evaluate
+                eval_results = self.train(X, y, processed_locations)
+                
+                # Store results
+                results[timestep] = {
+                    'train_stats': eval_results['train_stats'],
+                    'test_stats': eval_results['test_stats'],
+                    'n_samples': len(y),
+                    'n_skipped': len(skipped_locations)
+                }
+                
+                # Save intermediate results
+                self.save_timestep_results(results, f'timestep_results_{timestep}.json')
+                
+            except Exception as e:
+                logging.error(f"Error processing timestep {timestep}: {str(e)}")
+                results[timestep] = {'error': str(e)}
+        
+        return results
     
-    model = TransformerEncoderWithMask()    
+    def save_timestep_results(self, results, filename):
+        """Save results to JSON file"""
+        # Convert results to serializable format
+        serializable_results = {}
+        for timestep, result in results.items():
+            if isinstance(result, dict) and 'error' in result:
+                serializable_results[str(timestep)] = result
+            else:
+                serializable_results[str(timestep)] = {
+                    'train_stats': result['train_stats'],
+                    'test_stats': result['test_stats'],
+                    'n_samples': result['n_samples'],
+                    'n_skipped': result['n_skipped']
+                }
+        
+        with open(filename, 'w') as f:
+            json.dump(serializable_results, f, indent=2)
     
-    print("\nBefore loading checkpoint:")
-    print("Model state dict keys:", model.state_dict().keys())
-    print("Embedding weight shape:", model.embedding.weight.shape)
-    print("Embedding weight sample:", model.embedding.weight[:5, :5])
-    print("Embedding on device:", model.embedding.weight.device)
-    
-    # Load checkpoint
-    #checkpoint = torch.load("checkpoints/20241111_014211/model_checkpoint_step_70000.pt")
-    #checkpoint = torch.load("checkpoints/20241110_180007/model_checkpoint_step_10000.pt")
-    #checkpoint = torch.load("../../../maps-priv/maps/zf281/btfm-training-10.4/checkpoints/20241106_221143/model_checkpoint_val_best.pt")
-    
-    checkpoint = torch.load("checkpoints/20241111_200219/model_checkpoint_step_20000.pt") # old tile setup
-    #checkpoint = torch.load("checkpoints/20241111_144650/model_checkpoint_step_20000.pt") # new tile setup
+    def plot_grid_search_results(self, results):
+        """Plot grid search results"""
+        timesteps = sorted([t for t in results.keys() if isinstance(t, (int, float))])
+        test_r2 = [results[t]['test_stats']['r2'] for t in timesteps 
+                   if 'test_stats' in results[t]]
+        test_mse = [results[t]['test_stats']['mse'] for t in timesteps 
+                   if 'test_stats' in results[t]]
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        
+        # R2 plot
+        ax1.plot(timesteps, test_r2, 'o-')
+        ax1.set_xlabel('Number of Timesteps')
+        ax1.set_ylabel('Test R2')
+        ax1.set_title('Test R2 vs Number of Timesteps')
+        ax1.set_xscale('log')
+        ax1.grid(True)
+        
+        # MSE plot
+        ax2.plot(timesteps, test_mse, 'o-')
+        ax2.set_xlabel('Number of Timesteps')
+        ax2.set_ylabel('Test MSE')
+        ax2.set_title('Test MSE vs Number of Timesteps')
+        ax2.set_xscale('log')
+        ax2.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig('timestep_grid_search_results.png')
+        plt.close()
 
+def main_grid_search():
+    # Initialize model same as before
+    model = TransformerEncoderWithMask()
+    checkpoint = torch.load("checkpoints/20241111_200219/model_checkpoint_step_20000.pt")
     state_dict = {k.replace('backbone.', ''): v for k, v in checkpoint['model_state_dict'].items() 
                  if k.startswith('backbone.')}
-    
     model.load_state_dict(state_dict, strict=False)
     
-    print("\nAfter loading checkpoint:")
-    print("Model state dict keys:", model.state_dict().keys())
-    print("Embedding weight shape:", model.embedding.weight.shape)
-    print("Embedding weight sample:", model.embedding.weight[:5, :5])
-    print("Embedding on device:", model.embedding.weight.device)
-    
-    predictor = BiodiversityPredictor(model)
+    # Initialize predictor with grid search
+    predictor = BiodiversityPredictorWithGridSearch(model)
     biodiversity_df = pd.read_csv("../../../maps/ray25/data/spun_data/ECM_richness_europe.csv")
     
-    X, y, processed_locations, skipped_locations = predictor.prepare_dataset(
+    # Define timesteps for grid search
+    timesteps = [1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 80, 96]
+    
+    # Run grid search
+    results = predictor.grid_search_timesteps(
         biodiversity_df,
-        base_sentinel_path="../../../maps/ray25/data/germany/processed"
+        base_sentinel_path="../../../maps/ray25/data/germany/processed",
+        timesteps=timesteps
     )
     
-    logging.info(f"Shape of extracted representations: {X.shape}")
+    # Save final results
+    predictor.save_timestep_results(results, 'timestep_grid_search_final.json')
     
-    pd.DataFrame(processed_locations).to_csv('processed_locations.csv', index=False)
-    pd.DataFrame(skipped_locations, columns=['index', 'reason']).to_csv('skipped_locations.csv', index=False)
+    # Plot results
+    predictor.plot_grid_search_results(results)
     
-    results = predictor.train(X, y, processed_locations)
-    
-    logging.info("Model Performance:")
-    logging.info(f"Training MSE: {results['train_stats']['mse']:.4f}")
-    logging.info(f"Training R2: {results['train_stats']['r2']:.4f}")
-    logging.info(f"Test MSE: {results['test_stats']['mse']:.4f}")
-    logging.info(f"Test R2: {results['test_stats']['r2']:.4f}")
-    
-    fig = predictor.plot_results(results)
-    fig.savefig('biodiversity_prediction_results.png')
-    plt.close()
+    # Print best timestep
+    test_r2_scores = {t: results[t]['test_stats']['r2'] for t in timesteps 
+                      if 'test_stats' in results[t]}
+    best_timestep = max(test_r2_scores.items(), key=lambda x: x[1])[0]
+    logging.info(f"\nBest timestep: {best_timestep}")
+    logging.info(f"Best R2 score: {test_r2_scores[best_timestep]:.4f}")
 
 if __name__ == "__main__":
-    main()
+    main_grid_search()
