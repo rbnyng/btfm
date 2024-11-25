@@ -24,6 +24,8 @@ default_config = {
     "warmup_steps": 1000,
     "warmdown_steps": 10000,
     "barlow_lambda": 5e-4,
+    "mmcr_lambda": 5e-4,
+    "mmcr_alpha": 5e-3,
     "weight_decay": 1.5e-6,
     "gradient_clipping": 1.0,
     
@@ -42,6 +44,16 @@ default_config = {
     
     # DataLoader settings
     "num_workers": 6,
+
+    # Matryoshka settings
+    "nesting_dims": [32, 64, 128, 256, 512],  # Dimensions for nested representations
+    "nesting_weights": [0.5, 0.75, 1.0, 1.0, 1.0],  # Optional weights for each dimension
+    "backbone": "matryoshka_transformer",  # New backbone option
+    "projector_dims": [512, 512, 512, 512, 512],  # Output dims for each granularity
+    "num_heads": 8,
+    "num_layers": 6,
+    "dropout": 0.2,
+    "input_dim": 10, 
     
     # Logging and visualization
     "log_interval_steps": 64,

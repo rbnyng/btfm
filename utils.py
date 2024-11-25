@@ -18,19 +18,40 @@ import cv2
 #     return torch.exp(-(p * torch.log(p)).sum())
 
 def rankme(z, eps=1e-7):
+    """
+    Compute rankme score for either a single tensor or list of tensors
+    Args:
+        z: Either a single tensor of shape (batch_size, dim) or 
+           a list of tensors each of shape (batch_size, dim_i)
+    """
+    if isinstance(z, list):
+        # Handle list of tensors from matryoshka model
+        scores = []
+        for z_i in z:
+            try:
+                s = z_i.svd(compute_uv=False)[1]
+            except RuntimeError:
+                # Add small regularization
+                z_i = z_i + torch.eye(z_i.size(-1), device=z_i.device) * 1e-6
+                s = z_i.svd(compute_uv=False)[1]
 
-    try:
-        s = z.svd(compute_uv=False)[1]
-    except RuntimeError:
-        # Add small regularization
-        z = z + torch.eye(z.size(-1), device=z.device) * 1e-6
-        s = z.svd(compute_uv=False)[1]
+            p = s / (s.sum() + eps)
+            entropy = -(p * torch.log(p + eps)).sum()
+            score = entropy / torch.log(torch.tensor(float(len(s))))
+            scores.append(score)
+        return scores  # Return list of scores for each granularity
+    else:
+        # Original behavior for single tensor
+        try:
+            s = z.svd(compute_uv=False)[1]
+        except RuntimeError:
+            z = z + torch.eye(z.size(-1), device=z.device) * 1e-6
+            s = z.svd(compute_uv=False)[1]
 
-    p = s / (s.sum() + eps)
-    entropy = -(p * torch.log(p + eps)).sum()
-    rankme_score = entropy / torch.log(torch.tensor(float(len(s))))
-    return rankme_score
-
+        p = s / (s.sum() + eps)
+        entropy = -(p * torch.log(p + eps)).sum()
+        return entropy / torch.log(torch.tensor(float(len(s))))
+        
 # generates and returns an image of the cross-correlation matrix
 # for the provided z0 and z1 arrays
 # z is (batch_size, latent_dim) array

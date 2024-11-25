@@ -298,16 +298,16 @@ class SentinelTimeSeriesDatasetFixedTimestep(IterableDataset):
                 result_masks[idx] = 0
 
         # 进行样条插值
-        valid_indices = np.where(result_masks.numpy() == 1)[0]  # 找到有效的时间步
-        if len(valid_indices) > 1:
+        # valid_indices = np.where(result_masks.numpy() == 1)[0]  # 找到有效的时间步
+        # if len(valid_indices) > 1:
             # 进行样条插值
-            cs = CubicSpline(valid_indices, result_bands[valid_indices].numpy(), bc_type='natural')
-            all_indices = np.arange(96)
-            interpolated_bands = cs(all_indices)
+            # cs = CubicSpline(valid_indices, result_bands[valid_indices].numpy(), bc_type='natural')
+            # all_indices = np.arange(96)
+            # interpolated_bands = cs(all_indices)
 
             # 确保插值结果非负
-            interpolated_bands = np.clip(interpolated_bands, a_min=0, a_max=None)
-            result_bands = torch.tensor(interpolated_bands, dtype=torch.float32)
+            # interpolated_bands = np.clip(interpolated_bands, a_min=0, a_max=None)
+            # result_bands = torch.tensor(interpolated_bands, dtype=torch.float32)
 
         return result_bands, result_masks
 

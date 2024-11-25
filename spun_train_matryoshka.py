@@ -18,6 +18,7 @@ from scipy import stats
 import json
 from einops import rearrange  
 from scipy.interpolate import interp1d, CubicSpline
+from train_new_transformer_matryoshka import MatryoshkaTransformerWithMask
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,107 +85,22 @@ class RepresentationExtractor:
         self.tile_cache = TileCache(max_cache_size=cache_size)
         self.model_timesteps = 96
         
-    def compress_to_fixed_timesteps(self, pixel_data, mask_data, doys, timestep=16, method='linear'):
-        if method == 'duplicate':
-            # Get valid observations
-            valid_idx = np.where(mask_data == 0)[0]
-            if len(valid_idx) == 0:
-                return None, None
+    def compress_to_fixed_timesteps(self, band_sample, mask_sample, doys):
+        result_bands = torch.zeros((96, band_sample.shape[1]), dtype=torch.float32)
+        result_masks = torch.zeros(96, dtype=torch.int8)
 
-            valid_bands = pixel_data[valid_idx].astype(np.float32)
-            valid_doys = doys[valid_idx]  # Get doys of valid obs
+        week_intervals = [(i * 3.75, min(i * 3.75 + 3.75, 365)) for i in range(96)]
 
-            # Equally spaced sampling
-            # Calculate indices for equally spaced samples within valid obs
-            indices = np.linspace(0, len(valid_bands) - 1, timestep, dtype=int)  
-
-            # Sample data at these indices
-            sampled_bands = valid_bands[indices]
-            sampled_doys = valid_doys[indices] 
-
-            # Duplication
-            # Calculate how many times each sampled observation should be repeated
-            total_repeats = self.model_timesteps
-            base_repeats = total_repeats // timestep
-            remainder = total_repeats % timestep
-
-            # Create an array of repeat counts, distributing the remainder evenly
-            repeat_counts = np.full(timestep, base_repeats)
-            for i in range(remainder):
-                repeat_counts[i % timestep] += 1
-
-            # Create the final repeated array
-            result_bands = torch.from_numpy(np.repeat(sampled_bands, repeat_counts, axis=0)).float()
-            result_masks = torch.ones(total_repeats, dtype=torch.int8)
-
-            return result_bands, result_masks
-        
-        result_bands = torch.zeros((timestep, pixel_data.shape[1]), dtype=torch.float32)
-        result_masks = torch.zeros(timestep, dtype=torch.int8)
-        interval_length = 365 / timestep
-        week_intervals = [(i * interval_length, min(i * interval_length + interval_length, 365)) 
-                        for i in range(timestep)]
-        
         for idx, (start_day, end_day) in enumerate(week_intervals):
             week_idx = np.where((doys >= start_day) & (doys <= end_day))[0]
             if len(week_idx) > 0:
                 selected_idx = week_idx[len(week_idx) // 2]
-                result_bands[idx] = torch.from_numpy(pixel_data[selected_idx])
-                result_masks[idx] = mask_data[selected_idx]
-        
-        # Get valid indices
-        valid_indices = np.where(result_masks.numpy() == 1)[0]
-        
-        # Interpolation methods
-        if len(valid_indices) > 1:
-            interpolated_bands = []
-            for feature_idx in range(pixel_data.shape[1]):
-                valid_values = result_bands[valid_indices, feature_idx].numpy()
-                
-                if method == 'cubic_spline':
-                    cs = CubicSpline(valid_indices, valid_values, bc_type='natural')
-                    all_indices = np.arange(timestep)
-                    interpolated = cs(all_indices)
-                elif method == 'linear':
-                    interpolated = np.interp(np.arange(timestep), 
-                                        valid_indices, 
-                                        valid_values)
-                elif method == 'quadratic':
-                    if len(valid_indices) > 2:  # Need at least 3 points for quadratic
-                        z = np.polyfit(valid_indices, valid_values, 2)
-                        p = np.poly1d(z)
-                        interpolated = p(np.arange(timestep))
-                    else:
-                        # Fall back to linear if not enough points
-                        interpolated = np.interp(np.arange(timestep), 
-                                            valid_indices, 
-                                            valid_values)
-                elif method == 'nearest':
-                    interpolated = np.interp(np.arange(timestep),
-                                           valid_indices,
-                                           valid_values,
-                                           left=valid_values[0],
-                                           right=valid_values[-1])
-                    # Round to nearest valid value
-                    valid_values_sorted = np.sort(valid_values)
-                    for i in range(len(interpolated)):
-                        idx = np.abs(valid_values_sorted - interpolated[i]).argmin()
-                        interpolated[i] = valid_values_sorted[idx]
-                else:
-                    raise ValueError(f"Unknown interpolation method: {method}")
-                    
-                interpolated = np.clip(interpolated, a_min=0, a_max=None)
-                interpolated_bands.append(interpolated)
-            
-            result_bands = torch.tensor(np.stack(interpolated_bands, axis=1), 
-                                    dtype=torch.float32)
-            # Create new mask for interpolated data
-            result_masks = torch.ones(timestep, dtype=torch.int8)
-        
-        if timestep is not None and timestep != self.model_timesteps:
-            result_bands = self.resample_timesteps(result_bands, self.model_timesteps)
-            result_masks = torch.ones(self.model_timesteps, dtype=torch.int8)
-            
+                result_bands[idx] = band_sample[selected_idx]
+                result_masks[idx] = mask_sample[selected_idx]
+            else:
+                result_bands[idx] = 0
+                result_masks[idx] = 0
+
         return result_bands, result_masks
 
     def resample_timesteps(self, data, timesteps):
@@ -232,7 +148,6 @@ class RepresentationExtractor:
                 continue
 
             try:
-                # Compress to fixed timesteps and interpolate
                 sampled_pixel_data, sampled_masks = self.compress_to_fixed_timesteps(
                     pixel_data, 
                     mask_data,
@@ -244,7 +159,7 @@ class RepresentationExtractor:
                 
                 with torch.no_grad():
                     representation = self.model(pixel_tensor)
-                    representations[(row, col)] = representation[0].cpu().numpy()
+                    representations[(row, col)] = representation[0].cpu()
                     
             except Exception as e:
                 logging.error(f"Error processing coordinate ({row}, {col}): {str(e)}")
@@ -556,152 +471,179 @@ class BiodiversityPredictor:
         plt.tight_layout()
         return fig
         
-class BiodiversityPredictorWithGridSearch(BiodiversityPredictor):
-    def __init__(self, model, current_timestep=16):
+class MatryoshkaRepresentationEvaluator(BiodiversityPredictor):
+    def __init__(self, model, nesting_dims=[32, 64, 128, 256, 512]):
         super().__init__(model)
-        self.current_timestep = current_timestep
+        self.nesting_dims = nesting_dims
         
-    def grid_search_timesteps(self, biodiversity_df, base_sentinel_path, timesteps=None):
-        """
-        Perform grid search over different temporal sampling rates and interpolation methods.
-        """
-        if timesteps is None:
-            timesteps = [1, 2, 4, 8, 16, 32, 64, 96]
-            
-        methods = ['cubic_spline', 'linear', 'quadratic', 'nearest', 'duplicate']
+    def grid_search_representations(self, biodiversity_df, base_sentinel_path):
         results = {}
         
-        for timestep in tqdm(timesteps, desc="Grid searching timesteps"):
-            results[timestep] = {}
-            logging.info(f"\nEvaluating timestep: {timestep}")
-            
-            for method in methods:
-                logging.info(f"Testing method: {method}")
+        logging.info(f"Evaluating performance across representation sizes: {self.nesting_dims}")
+        
+        class DimensionRepresentationExtractor(RepresentationExtractor):
+            def __init__(self, model, dim_idx):
+                super().__init__(model)
+                self.dim_idx = dim_idx
                 
-                class TimestepRepresentationExtractor(RepresentationExtractor):
-                    def __init__(self, model, timestep, method):
-                        super().__init__(model)
-                        self.current_timestep = timestep
-                        self.interpolation_method = method
+            def extract_representation_for_coordinates(self, tile_path, coordinates, min_valid_samples=32):
+                bands, masks, doys = self.tile_cache.get(tile_path)
+                if bands is None:
+                    return {}
+
+                representations = {}
+                for row, col in coordinates:
+                    pixel_data = bands[:, row, col, :]
+                    mask_data = masks[:, row, col]
                     
-                    def compress_to_fixed_timesteps(self, pixel_data, mask_data, doys):
-                        return super().compress_to_fixed_timesteps(
-                            pixel_data, mask_data, doys, 
-                            timestep=self.current_timestep,
-                            method=self.interpolation_method
-                        )
-                
-                try:
-                    self.representation_extractor = TimestepRepresentationExtractor(
-                        self.model, 
-                        timestep,
-                        method
-                    )
-                    
-                    # Extract features and prepare dataset
-                    X, y, processed_locations, skipped_locations = self.prepare_dataset(
-                        biodiversity_df,
-                        base_sentinel_path
-                    )
-                    
-                    if len(processed_locations) < 5:  # Minimum samples threshold
-                        results[timestep][method] = {
-                            'error': f"Insufficient samples: {len(processed_locations)}"
-                        }
+                    if mask_data.sum() < min_valid_samples:
+                        representations[(row, col)] = None
                         continue
+
+                    try:
+                        pixel_tensor = torch.from_numpy(pixel_data).float()
+                        mask_tensor = torch.from_numpy(mask_data).int()
+                
+                        sampled_pixel_data, sampled_masks = self.compress_to_fixed_timesteps(
+                            pixel_tensor, mask_tensor, doys
+                        )
                         
-                    # Train and evaluate
-                    eval_results = self.train(X, y, processed_locations)
+                        # Add batch dimension and move to device
+                        pixel_batch = sampled_pixel_data.unsqueeze(0).to(self.device)
+                        mask_batch = sampled_masks.unsqueeze(0).to(self.device)
+                        
+                        with torch.no_grad():
+                            # Get all representations but only keep the one we want
+                            all_representations = self.model(pixel_batch, mask_batch)
+                            # Convert to numpy array for consistency with the rest of the pipeline
+                            representation = all_representations[self.dim_idx][0].cpu().numpy()
+                            representations[(row, col)] = representation
                     
-                    # Store results
-                    results[timestep][method] = {
-                        'train_stats': eval_results['train_stats'],
-                        'test_stats': eval_results['test_stats'],
-                        'n_samples': len(y),
-                        'n_skipped': len(skipped_locations)
+                    except Exception as e:
+                        logging.error(f"Error processing coordinate ({row}, {col}): {str(e)}")
+                        representations[(row, col)] = None
+
+                return representations
+                
+        for idx, dim in enumerate(tqdm(self.nesting_dims, desc="Evaluating representation sizes")):
+            logging.info(f"\nEvaluating dimension size: {dim}")
+            
+            try:
+                # Set up extractor for this dimension
+                self.representation_extractor = DimensionRepresentationExtractor(
+                    self.model, 
+                    dim_idx=idx
+                )
+                
+                # Extract features and prepare dataset
+                X, y, processed_locations, skipped_locations = self.prepare_dataset(
+                    biodiversity_df,
+                    base_sentinel_path
+                )
+                
+                if len(processed_locations) < 5:
+                    results[dim] = {
+                        'error': f"Insufficient samples: {len(processed_locations)}"
                     }
+                    continue
                     
-                except Exception as e:
-                    logging.error(f"Error processing timestep {timestep} with method {method}: {str(e)}")
-                    results[timestep][method] = {'error': str(e)}
+                # Train and evaluate
+                eval_results = self.train(X, y, processed_locations)
+                
+                # Store results
+                results[dim] = {
+                    'train_stats': eval_results['train_stats'],
+                    'test_stats': eval_results['test_stats'],
+                    'n_samples': len(y),
+                    'n_skipped': len(skipped_locations),
+                }
+                
+            except Exception as e:
+                logging.error(f"Error processing dimension {dim}: {str(e)}")
+                results[dim] = {'error': str(e)}
         
         return results
         
-    def save_timestep_results(self, results, filename):
-        """Save results to JSON file"""
-        serializable_results = {}
-        for timestep, result in results.items():
-            serializable_results[str(timestep)] = result
+    def plot_dimension_results(self, results):
+        """Plot evaluation results across different representation sizes"""
+        dims = sorted([d for d in results.keys() if isinstance(d, (int, float))])
+        metrics = {
+            'r2': [results[d]['test_stats']['r2'] for d in dims if 'test_stats' in results[d]],
+            'mse': [results[d]['test_stats']['mse'] for d in dims if 'test_stats' in results[d]],
+            'mae': [results[d]['test_stats']['mean_absolute_error'] for d in dims if 'test_stats' in results[d]]
+        }
         
-        with open(filename, 'w') as f:
-            json.dump(serializable_results, f, indent=2)
-        
-    def plot_grid_search_results(self, results):
-        """Plot grid search results"""
-        timesteps = sorted([t for t in results.keys() if isinstance(t, (int, float))])
-        test_r2 = [results[t]['test_stats']['r2'] for t in timesteps 
-                   if 'test_stats' in results[t]]
-        test_mse = [results[t]['test_stats']['mse'] for t in timesteps 
-                   if 'test_stats' in results[t]]
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
         
         # R2 plot
-        ax1.plot(timesteps, test_r2, 'o-')
-        ax1.set_xlabel('Number of Timesteps')
-        ax1.set_ylabel('Test R2')
-        ax1.set_title('Test R2 vs Number of Timesteps')
-        ax1.set_xscale('log')
-        ax1.grid(True)
+        axes[0].plot(dims, metrics['r2'], 'o-')
+        axes[0].set_xlabel('Representation Dimension')
+        axes[0].set_ylabel('Test R2')
+        axes[0].set_title('Test R2 vs Representation Size')
+        axes[0].set_xscale('log', base=2)
+        axes[0].grid(True)
         
         # MSE plot
-        ax2.plot(timesteps, test_mse, 'o-')
-        ax2.set_xlabel('Number of Timesteps')
-        ax2.set_ylabel('Test MSE')
-        ax2.set_title('Test MSE vs Number of Timesteps')
-        ax2.set_xscale('log')
-        ax2.grid(True)
+        axes[1].plot(dims, metrics['mse'], 'o-')
+        axes[1].set_xlabel('Representation Dimension')
+        axes[1].set_ylabel('Test MSE')
+        axes[1].set_title('Test MSE vs Representation Size')
+        axes[1].set_xscale('log', base=2)
+        axes[1].grid(True)
+        
+        # MAE plot
+        axes[2].plot(dims, metrics['mae'], 'o-')
+        axes[2].set_xlabel('Representation Dimension')
+        axes[2].set_ylabel('Test MAE')
+        axes[2].set_title('Test MAE vs Representation Size')
+        axes[2].set_xscale('log', base=2)
+        axes[2].grid(True)
         
         plt.tight_layout()
-        plt.savefig('timestep_grid_search_results.png')
+        plt.savefig('matryoshka_dimension_results.png')
         plt.close()
-
-def main_grid_search():
-    # Initialize model same as before
-    model = TransformerEncoderWithMask()
-    checkpoint = torch.load("checkpoints/20241114_152521/model_checkpoint_val_best.pt")
+    
+def main_matryoshka_evaluation():
+    # Initialize Matryoshka model
+    model = MatryoshkaTransformerWithMask(
+        input_dim=10,
+        embed_dim=64, 
+        num_heads=8,
+        hidden_dim=256,
+        num_layers=6,
+        nesting_dims=[32, 64, 128, 256, 512]
+    )
+    
+    checkpoint = torch.load("checkpoints/20241123_124337/model_checkpoint_val_best.pt")
     state_dict = {k.replace('backbone.', ''): v for k, v in checkpoint['model_state_dict'].items() 
                  if k.startswith('backbone.')}
     model.load_state_dict(state_dict, strict=False)
+        
+    # Initialize evaluator
+    evaluator = MatryoshkaRepresentationEvaluator(model)
     
-    # Initialize predictor with grid search
-    predictor = BiodiversityPredictorWithGridSearch(model)
+    # Load biodiversity data
     biodiversity_df = pd.read_csv("../../../maps/ray25/data/spun_data/ECM_richness_europe.csv")
     
-    # Define timesteps for grid search
-    timesteps = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96]    
-    
-    #timesteps = [2, 4, 8, 16, 32, 48, 64, 72, 80, 88, 96]   
-    
-    # Run grid search
-    results = predictor.grid_search_timesteps(
+    # Run evaluation
+    results = evaluator.grid_search_representations(
         biodiversity_df,
-        base_sentinel_path="../../../maps/ray25/data/germany/processed",
-        timesteps=timesteps
+        base_sentinel_path="../../../maps/ray25/data/germany/processed"
     )
     
-    # Save final results
-    predictor.save_timestep_results(results, 'timestep_grid_search_final.json')
+    # Save results
+    with open('matryoshka_representation_results.json', 'w') as f:
+        json.dump(results, f, indent=2)
     
     # Plot results
-    predictor.plot_grid_search_results(results)
+    evaluator.plot_dimension_results(results)
     
-    # Print best timestep
-    test_r2_scores = {t: results[t]['test_stats']['r2'] for t in timesteps 
-                      if 'test_stats' in results[t]}
-    best_timestep = max(test_r2_scores.items(), key=lambda x: x[1])[0]
-    logging.info(f"\nBest timestep: {best_timestep}")
-    logging.info(f"Best R2 score: {test_r2_scores[best_timestep]:.4f}")
+    # Print best dimension
+    test_r2_scores = {d: results[d]['test_stats']['r2'] for d in evaluator.nesting_dims 
+                      if 'test_stats' in results[d]}
+    best_dim = max(test_r2_scores.items(), key=lambda x: x[1])[0]
+    logging.info(f"\nBest representation dimension: {best_dim}")
+    logging.info(f"Best R2 score: {test_r2_scores[best_dim]:.4f}")
 
 if __name__ == "__main__":
-    main_grid_search()
+    main_matryoshka_evaluation()
