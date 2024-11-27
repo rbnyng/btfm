@@ -87,12 +87,10 @@ class MatryoshkaTransformerWithMask(nn.Module):
         return outputs
 
 class MatryoshkaCombinedLoss(nn.Module):
-    def __init__(self, batch_size, barlow_lambda=5e-3, mmcr_alpha=5e-3, 
-                 nesting_weights=None, matryoshka_lambda=1.0):
+    def __init__(self, lambda_coeff=5e-3, alpha=5e-3, matryoshka_lambda=1.0, nesting_weights=None):
         super().__init__()
-        self.batch_size = batch_size
-        self.barlow_lambda = barlow_lambda
-        self.mmcr_alpha = mmcr_alpha
+        self.lambda_coeff = lambda_coeff  # Barlow Twins coefficient
+        self.alpha = alpha  # MMCR coefficient
         self.matryoshka_lambda = matryoshka_lambda
         self.nesting_weights = nesting_weights or [1.0] * 5
 
@@ -101,42 +99,42 @@ class MatryoshkaCombinedLoss(nn.Module):
         assert n == m
         return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
-    def compute_barlow_loss(self, z1, z2):
-        z1_norm = (z1 - z1.mean(0)) / (z1.std(0) + 1e-9)
-        z2_norm = (z2 - z2.mean(0)) / (z2.std(0) + 1e-9)
-        cross_corr = torch.matmul(z1_norm.T, z2_norm) / self.batch_size
+    def compute_loss(self, z1, z2):
+        epsilon = 1e-9
+        batch_size = z1.shape[0]
+        
+        # Barlow Twins loss
+        z1_norm = (z1 - torch.mean(z1, dim=0)) / (torch.std(z1, dim=0) + epsilon)
+        z2_norm = (z2 - torch.mean(z2, dim=0)) / (torch.std(z2, dim=0) + epsilon)
+        cross_corr = torch.matmul(z1_norm.T, z2_norm) / batch_size
         
         on_diag = torch.diagonal(cross_corr).add_(-1).pow_(2).sum()
         off_diag = self.off_diagonal_ele(cross_corr).pow_(2).sum()
-        
-        return on_diag + self.barlow_lambda * off_diag
+        barlow_loss = on_diag + self.lambda_coeff * off_diag
 
-    def compute_mmcr_loss(self, z1, z2):
+        # MMCR loss
         z_combined = torch.cat([z1, z2], dim=0)
         z_combined = z_combined - z_combined.mean(dim=0, keepdim=True)
         
-        # Compute centroids and nuclear norm
-        centroids = z_combined.view(self.batch_size, 2, -1).mean(dim=1)
+        centroids = z_combined.view(batch_size, 2, -1).mean(dim=1)
         _, s_centroids, _ = torch.linalg.svd(centroids)
         mmcr_loss = -s_centroids.sum()
         
-        # Sample expansion term
         _, s_z_combined, _ = torch.linalg.svd(z_combined)
-        z_norm_loss = s_z_combined.sum() / self.batch_size
+        z_norm_loss = s_z_combined.sum() / batch_size
         
-        return self.mmcr_alpha * (mmcr_loss + self.barlow_lambda * z_norm_loss)
+        mmcr_total = self.alpha * (mmcr_loss + self.lambda_coeff * z_norm_loss)
+        
+        return barlow_loss + mmcr_total, barlow_loss.item(), mmcr_total.item()
 
     def compute_matryoshka_loss(self, z1s, z2s):
-        # Ensure consistent representation across granularities
         consistency_loss = 0
         for i in range(len(z1s) - 1):
-            # Compare adjacent granularities
             z1_curr = F.normalize(z1s[i], dim=1)
             z1_next = F.normalize(z1s[i + 1][:, :z1s[i].shape[1]], dim=1)
             z2_curr = F.normalize(z2s[i], dim=1)
             z2_next = F.normalize(z2s[i + 1][:, :z2s[i].shape[1]], dim=1)
             
-            # Cosine similarity between representations
             consistency_loss += (2 - (F.cosine_similarity(z1_curr, z1_next).mean() +
                                     F.cosine_similarity(z2_curr, z2_next).mean()))
             
@@ -147,21 +145,17 @@ class MatryoshkaCombinedLoss(nn.Module):
         barlow_losses = []
         mmcr_losses = []
         
-        # Compute Barlow and MMCR losses for each granularity
         for z1, z2, weight in zip(z1s, z2s, self.nesting_weights):
-            barlow_loss = self.compute_barlow_loss(z1, z2)
-            mmcr_loss = self.compute_mmcr_loss(z1, z2)
-            
-            total_loss += weight * (barlow_loss + mmcr_loss)
-            barlow_losses.append(barlow_loss.item())
-            mmcr_losses.append(mmcr_loss.item())
+            loss, barlow_loss, mmcr_loss = self.compute_loss(z1, z2)
+            total_loss += weight * loss
+            barlow_losses.append(barlow_loss)
+            mmcr_losses.append(mmcr_loss)
         
-        # Add Matryoshka consistency loss
         matryoshka_loss = self.compute_matryoshka_loss(z1s, z2s)
         total_loss += matryoshka_loss
         
         return total_loss, barlow_losses, mmcr_losses, matryoshka_loss.item()
-
+        
 def test_matryoshka_model_and_visualize(model, path_to_tile, test_batch_size=512, sample_size=16, n_pca_components=3, save_dir="."):
     # Load inference tile data
     tile_bands = np.load(path_to_tile + "/bands.npy")
@@ -418,10 +412,9 @@ def main():
         # barlow_loss = BarlowTwinsLoss(run_config["batch_size"], lambda_coeff=run_config["barlow_lambda"])
 
         criterion = MatryoshkaCombinedLoss(
-            batch_size=run_config["batch_size"],
-            barlow_lambda=run_config["barlow_lambda"],
-            mmcr_alpha=run_config["mmcr_alpha"],
-            nesting_weights=[0.5, 0.75, 1.0, 1.0, 1.0]
+            lambda_coeff=run_config["barlow_lambda"],
+            alpha=run_config["mmcr_alpha"],
+            nesting_weights=[1.0, 1.0, 1.0, 1.0, 1.0]
         )
 
         # we use the learning rate in the run_config for weights and 1/100th of that for biases (close to what the Barlow Twins paper used)

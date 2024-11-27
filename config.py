@@ -16,7 +16,7 @@ default_config = {
     "time_dim": 0,
     
     # Training settings
-    "epochs": 20,
+    "epochs": 1,
     "batch_size": 256,
     "learning_rate": 0.0001,
     # "learning_rate": 0.00001,
