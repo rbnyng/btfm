@@ -717,7 +717,7 @@ def main_matryoshka_evaluation():
         nesting_dims=[32, 64, 128, 256, 512]
     )
     
-    checkpoint = torch.load("checkpoints/20241123_124337/model_checkpoint_val_best.pt")
+    checkpoint = torch.load("checkpoints/20241128_124701/model_checkpoint_val_best.pt")
     state_dict = {k.replace('backbone.', ''): v for k, v in checkpoint['model_state_dict'].items() 
                  if k.startswith('backbone.')}
     model.load_state_dict(state_dict, strict=False)
