@@ -116,12 +116,11 @@ class MatryoshkaCombinedLoss(nn.Module):
         z_combined = torch.cat([z1, z2], dim=0)
         z_combined = z_combined - z_combined.mean(dim=0, keepdim=True)
         
-        current_batch_size = z_combined.shape[0] // 2
-        centroids = z_combined.view(current_batch_size, 2, -1).mean(dim=1)
-        _, s_centroids, _ = torch.linalg.svd(centroids, full_matrices=False)
+        centroids = z_combined.view(batch_size, 2, -1).mean(dim=1)
+        _, s_centroids, _ = torch.linalg.svd(centroids)
         mmcr_loss = -s_centroids.sum()
         
-        _, s_z_combined, _ = torch.linalg.svd(z_combined, full_matrices=False)
+        _, s_z_combined, _ = torch.linalg.svd(z_combined)
         z_norm_loss = s_z_combined.sum() / batch_size
         
         mmcr_total = self.alpha * (mmcr_loss + self.lambda_coeff * z_norm_loss)
