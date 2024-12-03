@@ -657,7 +657,7 @@ class MatryoshkaRepresentationEvaluator(BiodiversityPredictor):
         
     def analyze_perturbation_impact(self, biodiversity_df, base_sentinel_path, best_dim_idx, noise_std=0.1, augment_methods=['gaussian_noise', 'frequency_domain', 'gaussian_blur', 'random_band_dropout']):
 
-        self.representation_extractor = DimensionRepresentationExtractor(self.model, dim_idx=best_dim_idx)
+        self.representation_extractor = RepresentationExtractor(self.model)
 
         for augment_method in augment_methods:
             representations_clean, representations_augmented = {}, {}
@@ -728,11 +728,11 @@ class MatryoshkaRepresentationEvaluatorXGB(MatryoshkaRepresentationEvaluator):
             X, y, location_info, test_size=0.2, random_state=42
         )
 
-        self.rf_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42, n_jobs=-1)
-        self.rf_model.fit(X_train, y_train)
+        self.model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42, n_jobs=-1)
+        self.model.fit(X_train, y_train)
 
-        train_pred = self.rf_model.predict(X_train)
-        test_pred = self.rf_model.predict(X_test)
+        train_pred = self.model.predict(X_train)
+        test_pred = self.model.predict(X_test)
 
         train_stats = self.save_prediction_analysis(y_train, train_pred, info_train, "train_")
         test_stats = self.save_prediction_analysis(y_test, test_pred, info_test, "test_")
@@ -740,7 +740,7 @@ class MatryoshkaRepresentationEvaluatorXGB(MatryoshkaRepresentationEvaluator):
         results = {
             'train_stats': train_stats,
             'test_stats': test_stats,
-            'feature_importance': self.rf_model.feature_importances_,
+            'feature_importance': self.model.feature_importances_,
             'X_test': X_test,
             'y_test': y_test,
             'test_pred': test_pred
@@ -769,37 +769,9 @@ def main_matryoshka_evaluation():
     
     # Load biodiversity data
     biodiversity_df = pd.read_csv("../../../maps/ray25/data/spun_data/ECM_richness_europe.csv")
-    
-    # Run evaluation
-    results = evaluator.grid_search_representations(
-        biodiversity_df,
-        base_sentinel_path="../../../maps/ray25/data/germany/processed"
-    )
-    
-    # Save results
-    with open('matryoshka_representation_results.json', 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    # Plot results
-    evaluator.plot_dimension_results(results)
-    
-    # Print best dimension
-    test_r2_scores = {d: results[d]['test_stats']['r2'] for d in evaluator.nesting_dims 
-                      if 'test_stats' in results[d]}
-    best_dim = max(test_r2_scores.items(), key=lambda x: x[1])[0]
-    logging.info(f"\nBest representation dimension: {best_dim}")
-    logging.info(f"Best R2 score: {test_r2_scores[best_dim]:.4f}")
-    best_dim_idx = evaluator.nesting_dims.index(best_dim)
-    
+        
     # Perturbation Analysis
-    evaluator.analyze_perturbation_impact(biodiversity_df, "../../../maps/ray25/data/germany/processed", best_dim_idx, noise_std=0.1)
+    evaluator.analyze_perturbation_impact(biodiversity_df, "../../../maps/ray25/data/germany/processed", noise_std=0.1)
     
-    xgb_evaluator = MatryoshkaRepresentationEvaluatorXGB(model)
-    xgb_results = xgb_evaluator.grid_search_representations(biodiversity_df, "../../../maps/ray25/data/germany/processed")
-    xgb_evaluator.plot_dimension_results(xgb_results)
-    
-    with open('matryoshka_representation_results_xgb.json', 'w') as f:
-        json.dump(xgb_results, f, indent=2)
-
 if __name__ == "__main__":
     main_matryoshka_evaluation()
