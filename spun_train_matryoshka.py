@@ -22,7 +22,8 @@ from train_new_transformer_matryoshka import MatryoshkaTransformerWithMask
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.colors as mcolors
-
+from scipy.ndimage import gaussian_filter1d
+from scipy.fft import fft, ifft
 
 logging.basicConfig(
     level=logging.INFO,
@@ -157,57 +158,69 @@ class RepresentationExtractor:
 
         return representations
 
-    def extract_representation_for_coordinates_with_noise(self, tile_path, coordinates, noise_std=0.1, min_valid_samples=32):
-            bands, masks, doys = self.tile_cache.get(tile_path)
-            if bands is None:
-                return {}, {}
+    def extract_representation_for_coordinates_with_noise(self, tile_path, coordinates, noise_std=0.1, min_valid_samples=32, augment_method='gaussian_noise'):
+        bands, masks, doys = self.tile_cache.get(tile_path)
+        if bands is None:
+            return {}, {}
 
-            representations_clean = {}
-            representations_noisy = {}
+        representations_clean = {}
+        representations_augmented = {}
 
-            for row, col in coordinates:
-                pixel_data = bands[:, row, col, :]
-                mask_data = masks[:, row, col]
-                
-                if mask_data.sum() < min_valid_samples:
-                    representations_clean[(row, col)] = None
-                    representations_noisy[(row, col)] = None
-                    continue
+        for row, col in coordinates:
+            pixel_data = bands[:, row, col, :]
+            mask_data = masks[:, row, col]
 
-                try:
-                    pixel_tensor = torch.from_numpy(pixel_data).float()
-                    mask_tensor = torch.from_numpy(mask_data).int()
-            
-                    sampled_pixel_data, sampled_masks = self.compress_to_fixed_timesteps(
-                        pixel_tensor, mask_tensor, doys
-                    )
-                    
-                    # Add batch dimension and move to device
-                    pixel_batch = sampled_pixel_data.unsqueeze(0).to(self.device)
-                    mask_batch = sampled_masks.unsqueeze(0).to(self.device)
-                    
-                    with torch.no_grad():
-                        # Clean representation
-                        all_representations_clean = self.model(pixel_batch, mask_batch)
-                        representation_clean = all_representations_clean[self.dim_idx][0].cpu().numpy()
-                        
-                        # Add Gaussian noise
+            if mask_data.sum() < min_valid_samples:
+                representations_clean[(row, col)] = None
+                representations_augmented[(row, col)] = None
+                continue
+
+            try:
+                pixel_tensor = torch.from_numpy(pixel_data).float()
+                mask_tensor = torch.from_numpy(mask_data).int()
+
+                sampled_pixel_data, sampled_masks = self.compress_to_fixed_timesteps(
+                    pixel_tensor, mask_tensor, doys
+                )
+
+                pixel_batch = sampled_pixel_data.unsqueeze(0).to(self.device)
+                mask_batch = sampled_masks.unsqueeze(0).to(self.device)
+
+                with torch.no_grad():
+                    # Clean representation
+                    all_representations_clean = self.model(pixel_batch, mask_batch)
+                    representation_clean = all_representations_clean[self.dim_idx][0].cpu().numpy()
+
+                    if augment_method == 'gaussian_noise':
                         noise = torch.randn_like(pixel_batch) * noise_std
-                        noisy_pixel_tensor = pixel_batch + noise
-                        # Noisy representation
-                        all_representations_noisy = self.model(noisy_pixel_tensor, mask_batch)
-                        representation_noisy = all_representations_noisy[self.dim_idx][0].cpu().numpy()
+                        augmented_pixel_tensor = pixel_batch + noise
+                    elif augment_method == 'gaussian_blur':
+                        augmented_pixel_tensor = torch.from_numpy(gaussian_filter1d(pixel_batch.cpu().numpy(), sigma=1, axis=0)).to(self.device)                     
+                    elif augment_method == 'frequency_domain':
+                        freq_band = fft(pixel_batch.cpu().numpy(), axis=1)
+                        cutoff_freq = 8 
+                        freq_band[:, cutoff_freq:, :] = 0
+                        augmented_pixel_tensor = torch.from_numpy(np.real(ifft(freq_band, axis=1))).to(self.device)
+                    elif augment_method == 'random_band_dropout':
+                        drop_indices = np.random.choice(pixel_batch.shape[2], size=3, replace=False)
+                        augmented_pixel_tensor = pixel_batch.clone()
+                        augmented_pixel_tensor[:, :, drop_indices] = 0
+                    else:
+                        raise ValueError(f"Unknown augmentation method: {augment_method}")
 
-                    representations_clean[(row, col)] = representation_clean
-                    representations_noisy[(row, col)] = representation_noisy
+                    all_representations_augmented = self.model(augmented_pixel_tensor, mask_batch)
+                    representation_augmented = all_representations_augmented[self.dim_idx][0].cpu().numpy()
 
-                except Exception as e:
-                    logging.error(f"Error processing coordinate ({row}, {col}): {str(e)}")
-                    representations_clean[(row, col)] = None
-                    representations_noisy[(row, col)] = None
+                representations_clean[(row, col)] = representation_clean
+                representations_augmented[(row, col)] = representation_augmented
 
-            return representations_clean, representations_noisy
-            
+            except Exception as e:
+                logging.error(f"Error processing coordinate ({row}, {col}): {str(e)}")
+                representations_clean[(row, col)] = None
+                representations_augmented[(row, col)] = None
+
+        return representations_clean, representations_augmented
+        
 class Sentinel2Georeferencer:
     def __init__(self):
         self.mgrs_converter = mgrs.MGRS()
@@ -641,44 +654,46 @@ class MatryoshkaRepresentationEvaluator(BiodiversityPredictor):
         plt.savefig('matryoshka_dimension_results.png')
         plt.close()
         
-    def analyze_perturbation_impact(self, biodiversity_df, base_sentinel_path, best_dim_idx, noise_std=0.1, n_samples=1000):
+    def analyze_perturbation_impact(self, biodiversity_df, base_sentinel_path, best_dim_idx, noise_std=0.1, augment_methods=['gaussian_noise', 'frequency_domain', 'gaussian_blur', 'random_band_dropout']):
 
         self.representation_extractor = DimensionRepresentationExtractor(self.model, dim_idx=best_dim_idx)
 
-        representations_clean, representations_noisy = {}, {}
+        for augment_method in augment_methods:
+            representations_clean, representations_augmented = {}, {}
 
-        for idx, row in tqdm(biodiversity_df.iterrows(), desc="Processing locations for perturbation analysis"):
-            tile_path = self.georeferencer.find_matching_tile(
-                row['latitude'], row['longitude'], base_sentinel_path
-            )
-            if not tile_path:
-                continue
+            logging.info(f"Analyzing perturbation impact with method: {augment_method}")
 
-            pixel_coords = self.georeferencer.get_pixel_coordinates(
-                row['latitude'], row['longitude'], tile_path
-            )
-            if not pixel_coords:
-                continue
+            for idx, row in tqdm(biodiversity_df.iterrows(), desc=f"Processing locations for {augment_method}"):
+                tile_path = self.georeferencer.find_matching_tile(
+                    row['latitude'], row['longitude'], base_sentinel_path
+                )
+                if not tile_path:
+                    continue
+
+                pixel_coords = self.georeferencer.get_pixel_coordinates(
+                    row['latitude'], row['longitude'], tile_path
+                )
+                if not pixel_coords:
+                    continue
+                
+                clean, augmented = self.representation_extractor.extract_representation_for_coordinates_with_noise(
+                    Path(tile_path), [pixel_coords], noise_std=noise_std, augment_method=augment_method
+                )
+
+                if clean and augmented: # Check both dictionaries
+                    representations_clean.update(clean)
+                    representations_augmented.update(augmented)
+
+            clean_reps = np.array([r for r in representations_clean.values() if r is not None])
+            augmented_reps = np.array([r for r in representations_augmented.values() if r is not None])
             
-            clean, noisy = self.representation_extractor.extract_representation_for_coordinates_with_noise(
-                Path(tile_path), [pixel_coords], noise_std=noise_std,  min_valid_samples=32
-            )
+            if len(clean_reps) == 0 or len(augmented_reps) == 0:
+                raise ValueError(f"No valid representations were extracted for perturbation analysis with {augment_method}.")
 
-            if clean:
-                representations_clean.update({pixel_coords: clean[pixel_coords]})
-            if noisy:
-                 representations_noisy.update({pixel_coords: noisy[pixel_coords]})
+            self.visualize_representations(clean_reps, augmented_reps, title=f"Perturbation Analysis ({augment_method})")
 
-        clean_reps = np.array([r for r in representations_clean.values() if r is not None])
-        noisy_reps = np.array([r for r in representations_noisy.values() if r is not None])
-            
-        if len(clean_reps) == 0 or len(noisy_reps) == 0:
-            raise ValueError("No valid representations were extracted for perturbation analysis.")
+        return clean_reps, augmented_reps
         
-        self.visualize_representations(clean_reps, noisy_reps, title=f"Perturbation Analysis (Noise std={noise_std})")
-
-        return clean_reps, noisy_reps
-    
     def visualize_representations(self, clean_reps, noisy_reps, title="Representation Visualization"):
         combined_reps = np.concatenate([clean_reps, noisy_reps])
         labels = np.array([0] * len(clean_reps) + [1] * len(noisy_reps))  # 0 for clean, 1 for noisy
@@ -747,13 +762,9 @@ def main_matryoshka_evaluation():
     best_dim = max(test_r2_scores.items(), key=lambda x: x[1])[0]
     logging.info(f"\nBest representation dimension: {best_dim}")
     logging.info(f"Best R2 score: {test_r2_scores[best_dim]:.4f}")
-
-    # Find best dim
-    results = evaluator.grid_search_representations(biodiversity_df, "../../../maps/ray25/data/germany/processed")
-    test_r2_scores = {d: results[d]['test_stats']['r2'] for d in evaluator.nesting_dims if 'test_stats' in results[d]}
-    best_dim = max(test_r2_scores.items(), key=lambda x: x[1])[0]
     best_dim_idx = evaluator.nesting_dims.index(best_dim)
-
+    
+    best_dim_idx = 4
     # Perturbation Analysis
     evaluator.analyze_perturbation_impact(biodiversity_df, "../../../maps/ray25/data/germany/processed", best_dim_idx, noise_std=0.1)
     
