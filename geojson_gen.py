@@ -52,8 +52,8 @@ def save_geojson(geojson_data, output_file):
         json.dump(geojson_data, f, indent=2)
 
 if __name__ == "__main__":
-    input_csv = "data\SPUN\ECM_richness_europe.csv"
-    output_file = "europe.json"
+    input_csv = "data\SPUN\ECM_richness_asia.csv"
+    output_file = "asia.json"
     
     # Convert and save
     geojson_data = csv_to_geojson(input_csv)
